@@ -1,7 +1,10 @@
 """Slice-1 demo: generate single laterals on a parcel + render a plan-view PNG.
 
-    python demo.py                 # synthetic 1-mile section
-    python demo.py path/to/deal.zip   # a real deal shapefile
+    python demo.py                          # synthetic 1-mile section
+    python demo.py deal.zip                 # a single-parcel shapefile (dissolved)
+    python demo.py deals.zip "hecker"       # one named parcel from a multi-deal bundle
+    python demo.py deals.zip "hecker" 80    # ...with an explicit azimuth (else auto)
+    python demo.py deals.zip                # list the deal names in a bundle
 
 Tweak the ScenarioParams below to explore spacing / azimuth / setback.
 """
@@ -9,6 +12,7 @@ Tweak the ScenarioParams below to explore spacing / azimuth / setback.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -19,10 +23,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from shapely.geometry import MultiPolygon
 
-from narvi import ScenarioParams, generate_scenario, load_parcel_zip, synthetic_section
+from narvi import (
+    ScenarioParams,
+    generate_scenario,
+    load_named_parcels,
+    load_parcel_zip,
+    synthetic_section,
+)
 
 
-def _plot(parcel, window, wells, path: str) -> None:
+def _plot(parcel, window, wells, path: str, label: str) -> None:
     fig, ax = plt.subplots(figsize=(8, 8))
 
     def ring(geom, **kw):
@@ -37,34 +47,58 @@ def _plot(parcel, window, wells, path: str) -> None:
         ax.plot([w.heel_xy[0], w.toe_xy[0]], [w.heel_xy[1], w.toe_xy[1]],
                 color="#f97316", lw=2)
     ax.set_aspect("equal")
-    ax.set_title(f"{len(wells)} laterals — UTM 13N (m)")
+    ax.set_title(f"{label} — {len(wells)} laterals (UTM 13N m)")
     ax.legend(loc="upper right", fontsize=8)
     fig.savefig(path, dpi=110, bbox_inches="tight")
     print(f"  wrote {path}")
 
 
 def main() -> None:
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], "rb") as f:
-            parcel = load_parcel_zip(f.read())
-        src = sys.argv[1]
-    else:
+    args = sys.argv[1:]
+    azimuth = None
+    if args:  # a trailing numeric arg is an explicit azimuth override
+        try:
+            azimuth = float(args[-1])
+            args = args[:-1]
+        except ValueError:
+            pass
+
+    if not args:
         parcel = synthetic_section()
-        src = "synthetic 1-mile section"
+        label = "synthetic 1-mile section"
+    else:
+        data = open(args[0], "rb").read()
+        if len(args) > 1:  # named parcel from a multi-deal bundle
+            parcels = load_named_parcels(data)
+            want = args[1].strip().lower()
+            key = (next((k for k in parcels if k.lower() == want), None)
+                   or next((k for k in parcels if want in k.lower()), None))
+            if key is None:
+                print(f"'{args[1]}' not found. deals in bundle:")
+                for k in sorted(parcels):
+                    print(f"  - {k}")
+                return
+            parcel, label = parcels[key], key
+        else:
+            parcel, label = load_parcel_zip(data), os.path.basename(args[0])
 
     p = ScenarioParams(
-        formation="WCA_1", target_tvd_ft=11500,  # azimuth_deg omitted -> auto from parcel
+        formation="WCA_1", target_tvd_ft=11500, azimuth_deg=azimuth,  # None -> auto from parcel
         spacing_ft=880, setback_ft=200, min_lateral_ft=4000,
     )
     wells, window, feas = generate_scenario(parcel, p)
 
-    print(f"parcel: {src}  ({parcel.area / 4046.8564224:.0f} ac)")
+    title = label + (f"  (az {azimuth:.0f}°)" if azimuth is not None else "")
+    print(f"parcel: {label}  ({parcel.area / 4046.8564224:.0f} ac)")
     print(f"feasibility: {feas.note}")
     print(f"  placed={feas.placed}  total_completed={feas.total_completed_ft:,.0f} ft")
     for w in wells:
         print(f"  {w.well_name}  {w.completed_lateral_ft:>7,.0f} ft  "
               f"gunbarrel_x={w.gunbarrel_x_ft:>8,.0f} ft")
-    _plot(parcel, window, wells, os.path.join(os.path.dirname(__file__), "demo_planview.png"))
+    tag = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    if azimuth is not None:
+        tag += f"_az{int(azimuth)}"
+    _plot(parcel, window, wells, os.path.join(os.path.dirname(__file__), f"planview_{tag}.png"), title)
 
 
 if __name__ == "__main__":
