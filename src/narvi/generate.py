@@ -108,8 +108,13 @@ def generate_scenario(
     legs, centroid, phi, y_mid = laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft)
     spacing_m = p.spacing_ft / FT_PER_M
 
+    # U-turn leg-to-leg = the leg spacing here; a turn tighter than the floor is
+    # undrillable, so fall back to single laterals.
+    uturn = p.well_type == "uturn" and p.spacing_ft >= p.uturn_min_leg_to_leg_ft
+    floored = p.well_type == "uturn" and not uturn
+
     wells: list[InventoryWell] = []
-    if p.well_type == "uturn":
+    if uturn:
         i = 0
         while i < len(legs):
             if i + 1 < len(legs):
@@ -135,8 +140,10 @@ def generate_scenario(
         requested=None, placed=len(wells), legs=n_legs,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
         total_drilled_ft=round(sum(w.drilled_lateral_ft for w in wells), 1),
-        note=(f"{len(wells)} {p.well_type} wells / {n_legs} legs of {p.formation} at "
-              f"{p.spacing_ft:.0f} ft spacing / {p.setback_ft:.0f} ft setback / "
-              f"{az:.1f}° azimuth{' (auto)' if auto else ''}"),
+        note=(f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
+              f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {p.setback_ft:.0f} ft setback / "
+              f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
+              + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
+                 f"floor -> singles]" if floored else "")),
     )
     return wells, window, feas

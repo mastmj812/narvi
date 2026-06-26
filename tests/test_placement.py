@@ -49,7 +49,8 @@ def test_min_length_filters_short_laterals():
 
 def test_uturn_pairs_legs_with_turn():
     parcel = synthetic_section()
-    wells, _, feas = generate_scenario(parcel, _params(well_type="uturn"))
+    # 990 ft leg-to-leg = the floor (valid); R = 495 ft
+    wells, _, feas = generate_scenario(parcel, _params(well_type="uturn", spacing_ft=990))
     uturns = [w for w in wells if w.well_type == "uturn"]
     singles = [w for w in wells if w.well_type == "single"]
     # 5 legs -> 2 U-turns (4 legs) + 1 single leftover
@@ -57,11 +58,19 @@ def test_uturn_pairs_legs_with_turn():
     assert feas.legs == 5
     for w in uturns:
         assert len(w.legs) == 2 and w.turn is not None
-        # legs trimmed by R = spacing/2 = 440 ft from the 4,880 ft span
+        # legs trimmed by R = spacing/2 = 495 ft from the 4,880 ft span
         for leg in w.legs:
-            assert abs(leg.length_ft - 4440) < 10
-        assert w.turn.radius_ft == 440                          # spacing / 2
-        assert abs(w.turn.dls_deg_per_100ft - 13.02) < 0.1      # 5729.58 / 440
+            assert abs(leg.length_ft - 4385) < 10
+        assert w.turn.radius_ft == 495                          # spacing / 2
+        assert abs(w.turn.dls_deg_per_100ft - 11.58) < 0.1      # 5729.58 / 495
         # turn arc is non-producing: drilled = completed + pi*R
         assert w.drilled_lateral_ft > w.completed_lateral_ft
-        assert abs((w.drilled_lateral_ft - w.completed_lateral_ft) - math.pi * 440) < 5
+        assert abs((w.drilled_lateral_ft - w.completed_lateral_ft) - math.pi * 495) < 5
+
+
+def test_uturn_below_floor_falls_back_to_singles():
+    parcel = synthetic_section()
+    # 880 ft leg-to-leg is below the 990 ft floor -> undrillable turn -> singles
+    wells, _, feas = generate_scenario(parcel, _params(well_type="uturn", spacing_ft=880))
+    assert wells and all(w.well_type == "single" for w in wells)
+    assert "floor" in feas.note

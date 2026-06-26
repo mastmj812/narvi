@@ -30,6 +30,10 @@ class ScenarioParams:
     azimuth_deg: float | None = None
     well_type: str = "single"  # 'single' | 'uturn' (uturn pairs adjacent legs)
     min_lateral_ft: float = 4000.0
+    # U-turn leg-to-leg floor: below this the turn radius (leg-to-leg/2) is too
+    # tight to drill. 990 ft is a conservative hard floor — Novi's 214 real U-turns
+    # run ~1,400-1,600 ft typical (median 1,589); ~1,500 is a realistic default.
+    uturn_min_leg_to_leg_ft: float = 990.0
     scenario_id: str = "s1"
     deal_id: str = "demo"
 
