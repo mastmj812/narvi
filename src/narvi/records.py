@@ -29,11 +29,19 @@ class ScenarioParams:
     # long axis (dominant_azimuth) as a stand-in for the RRC section grid.
     azimuth_deg: float | None = None
     well_type: str = "single"  # 'single' | 'uturn' (uturn pairs adjacent legs)
+    # placement objective when azimuth is auto: 'max_lateral' (default) runs along
+    # the parcel long axis for the longest laterals; 'max_count' sweeps azimuth +
+    # row phase for the most legs. Default favors longer laterals (capital-efficient).
+    objective: str = "max_lateral"
     min_lateral_ft: float = 4000.0
     # U-turn leg-to-leg floor: below this the turn radius (leg-to-leg/2) is too
     # tight to drill. 990 ft is a conservative hard floor — Novi's 214 real U-turns
     # run ~1,400-1,600 ft typical (median 1,589); ~1,500 is a realistic default.
     uturn_min_leg_to_leg_ft: float = 990.0
+    # asymmetric per-boundary setbacks (override the uniform setback_ft). Geographic
+    # N/S vs E/W: edges facing N/S use setback_ns_ft, edges facing E/W use setback_ew_ft.
+    setback_ns_ft: float | None = None
+    setback_ew_ft: float | None = None
     scenario_id: str = "s1"
     deal_id: str = "demo"
 

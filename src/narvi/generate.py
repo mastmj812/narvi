@@ -109,12 +109,49 @@ def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n) -> InventoryWell 
     )
 
 
+def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float) -> int:
+    return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset)[0])
+
+
+def _best_offset(window: BaseGeometry, az: float, p: ScenarioParams) -> float:
+    """Pick the row phase (0 or spacing/2) that fits more legs (max_count)."""
+    half = p.spacing_ft / 2.0
+    return half if _count_legs(window, az, p, half) > _count_legs(window, az, p, 0.0) else 0.0
+
+
+def _best_azimuth(window: BaseGeometry, p: ScenarioParams) -> float:
+    """Sweep azimuth (5deg) x row phase for the most legs (max_count objective)."""
+    best_az, best_n = 0.0, -1
+    for a in range(0, 180, 5):
+        n = max(_count_legs(window, float(a), p, 0.0),
+                _count_legs(window, float(a), p, p.spacing_ft / 2.0))
+        if n > best_n:
+            best_az, best_n = float(a), n
+    return best_az
+
+
+def _resolve_azimuth(parcel: BaseGeometry, window: BaseGeometry, p: ScenarioParams) -> float:
+    if p.azimuth_deg is not None:
+        return p.azimuth_deg
+    if p.objective == "max_count":
+        return _best_azimuth(window, p)
+    return dominant_azimuth(parcel)            # max_lateral: parcel long axis
+
+
 def generate_scenario(
-    parcel: BaseGeometry, p: ScenarioParams, row_offset_ft: float = 0.0
+    parcel: BaseGeometry, p: ScenarioParams, row_offset_ft: float = 0.0,
+    optimize_phase: bool = True,
 ) -> tuple[list[InventoryWell], BaseGeometry, Feasibility]:
-    az = p.azimuth_deg if p.azimuth_deg is not None else dominant_azimuth(parcel)
+    ns = p.setback_ns_ft if p.setback_ns_ft is not None else p.setback_ft
+    ew = p.setback_ew_ft if p.setback_ew_ft is not None else p.setback_ft
+    setback_str = f"{ns:.0f}" if abs(ns - ew) < 1e-6 else f"{ns:.0f} NS/{ew:.0f} EW"
+    window = drillable_window(parcel, ns, ew)
+    az = _resolve_azimuth(parcel, window, p)
     auto = p.azimuth_deg is None
-    window = drillable_window(parcel, p.setback_ft)
+    # max_count also optimizes the single-zone row phase (the wine-rack manages its
+    # own stagger, so it passes optimize_phase=False).
+    if optimize_phase and p.objective == "max_count" and row_offset_ft == 0.0:
+        row_offset_ft = _best_offset(window, az, p)
     legs, centroid, phi, y_mid = laterals_rotated(
         window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft)
     spacing_m = p.spacing_ft / FT_PER_M
@@ -152,7 +189,7 @@ def generate_scenario(
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
         total_drilled_ft=round(sum(w.drilled_lateral_ft for w in wells), 1),
         note=(f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
-              f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {p.setback_ft:.0f} ft setback / "
+              f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
               f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
               + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
                  f"floor -> singles]" if floored else "")),
@@ -180,6 +217,10 @@ def generate_wine_rack(
     phase-shifted by `stagger_ft` (default spacing/2). Vertical separation between
     zones = the difference in their (median) landing TVDs."""
     stagger = base.spacing_ft / 2.0 if stagger_ft is None else stagger_ft
+    # resolve azimuth once so every bench shares it (and any max_count sweep runs once)
+    ns = base.setback_ns_ft if base.setback_ns_ft is not None else base.setback_ft
+    ew = base.setback_ew_ft if base.setback_ew_ft is not None else base.setback_ft
+    az = _resolve_azimuth(parcel, drillable_window(parcel, ns, ew), base)
     zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
 
     all_wells: list[InventoryWell] = []
@@ -189,8 +230,8 @@ def generate_wine_rack(
     for i, z in enumerate(zs):
         off = (i % 2) * stagger                       # alternate by depth
         offsets.append(off)
-        p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft)
-        wells, window, feas = generate_scenario(parcel, p, row_offset_ft=off)
+        p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft, azimuth_deg=az)
+        wells, window, feas = generate_scenario(parcel, p, row_offset_ft=off, optimize_phase=False)
         all_wells.extend(wells)
         zresults.append(ZoneResult(z.formation, z.target_tvd_ft, off, len(wells), feas.legs))
 

@@ -97,6 +97,10 @@ def main() -> None:
     winerack = "winerack" in args
     if winerack:
         args.remove("winerack")
+    maxcount = "maxcount" in args
+    if maxcount:
+        args.remove("maxcount")
+    objective = "max_count" if maxcount else "max_lateral"
     well_type = "single"
     for wt in ("uturn", "single"):
         if wt in args:
@@ -133,7 +137,8 @@ def main() -> None:
     if winerack:
         spacing = 1400.0 if well_type == "uturn" else 880.0  # U-turns need >= 990 leg-to-leg
         base = ScenarioParams(formation="", target_tvd_ft=0.0, azimuth_deg=azimuth,
-                              well_type=well_type, spacing_ft=spacing, setback_ft=200, min_lateral_ft=4000)
+                              well_type=well_type, objective=objective, spacing_ft=spacing,
+                              setback_ft=200, min_lateral_ft=4000)
         wells, window, rep = generate_wine_rack(parcel, base, _DEMO_ZONES)
         print(f"parcel: {label}  ({parcel.area / 4046.8564224:.0f} ac)")
         print(f"wine-rack: {rep.note}")
@@ -148,7 +153,7 @@ def main() -> None:
 
     p = ScenarioParams(
         formation="WCA_1", target_tvd_ft=11500, azimuth_deg=azimuth, well_type=well_type,
-        spacing_ft=880, setback_ft=200, min_lateral_ft=4000,
+        objective=objective, spacing_ft=880, setback_ft=200, min_lateral_ft=4000,
     )
     wells, window, feas = generate_scenario(parcel, p)
 

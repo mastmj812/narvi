@@ -15,8 +15,10 @@ from __future__ import annotations
 import math
 
 from shapely.affinity import rotate
-from shapely.geometry import LineString, MultiLineString, Point
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, Point
 from shapely.geometry.base import BaseGeometry
+from shapely.geometry.polygon import orient
+from shapely.ops import unary_union
 
 from .records import FT_PER_M
 
@@ -34,9 +36,40 @@ def dominant_azimuth(parcel: BaseGeometry) -> float:
     return math.degrees(math.atan2(x1 - x0, y1 - y0)) % 180.0
 
 
-def drillable_window(parcel: BaseGeometry, setback_ft: float) -> BaseGeometry:
-    """Inward offset by a uniform setback (slice 1; asymmetric edge-strip later)."""
-    return parcel.buffer(-setback_ft / FT_PER_M, join_style=2)
+def drillable_window(
+    parcel: BaseGeometry, setback_ns_ft: float, setback_ew_ft: float | None = None
+) -> BaseGeometry:
+    """Inward setback. Uniform (one value, or N/S == E/W) uses a robust negative
+    buffer; asymmetric (N/S vs E/W differ) uses per-edge strip subtraction."""
+    ew = setback_ns_ft if setback_ew_ft is None else setback_ew_ft
+    if abs(setback_ns_ft - ew) < 1e-6:
+        return parcel.buffer(-setback_ns_ft / FT_PER_M, join_style=2)
+    return _edge_strip_window(parcel, setback_ns_ft, ew)
+
+
+def _edge_strip_window(parcel: BaseGeometry, setback_ns_ft: float, setback_ew_ft: float) -> BaseGeometry:
+    """Per-edge inward strips: classify each boundary edge as N/S- or E/W-facing by
+    its outward normal and subtract a strip of the matching setback. Local strips
+    (not infinite half-planes), so it's robust to non-convex parcels / notches."""
+    ns = setback_ns_ft / FT_PER_M
+    ew = setback_ew_ft / FT_PER_M
+    polys = list(parcel.geoms) if isinstance(parcel, MultiPolygon) else [parcel]
+    strips = []
+    for poly in polys:
+        poly = orient(poly, 1.0)  # exterior CCW, holes CW -> interior is LEFT of each edge
+        for ring in [poly.exterior, *poly.interiors]:
+            cs = list(ring.coords)
+            for (ax, ay), (bx, by) in zip(cs, cs[1:]):
+                dx, dy = bx - ax, by - ay
+                if dx == 0 and dy == 0:
+                    continue
+                # outward normal = (dy, -dx); N/S-facing when |dx| >= |dy|
+                d = ns if abs(dx) >= abs(dy) else ew
+                if d > 0:  # single_sided buffers left of the line = inward (CCW ring)
+                    strips.append(LineString([(ax, ay), (bx, by)]).buffer(d, single_sided=True))
+    if not strips:
+        return parcel
+    return parcel.difference(unary_union(strips))
 
 
 def _longest_segment(geom: BaseGeometry) -> LineString | None:

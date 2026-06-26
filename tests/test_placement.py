@@ -100,3 +100,30 @@ def test_wine_rack_stagger_and_interzone_offset():
     # the deep zone's legs sit 440 ft off the shallow zone's (mod spacing)
     deep_x = {round(leg.gunbarrel_x_ft) for w in wells if w.target_tvd_ft == 11700 for leg in w.legs}
     assert all(abs((x % 880) - 440) < 1 for x in deep_x)
+
+
+def test_asymmetric_setback_shortens_ns_laterals():
+    parcel = synthetic_section()  # axis-aligned 5,280 ft square
+    # az=0 -> N-S laterals; the N/S setback controls their length
+    uni, _, _ = generate_scenario(parcel, _params())  # uniform 200
+    asy, _, _ = generate_scenario(parcel, _params(setback_ns_ft=600, setback_ew_ft=200))
+    assert abs(uni[0].legs[0].length_ft - 4880) < 10   # 5280 - 2*200
+    assert abs(asy[0].legs[0].length_ft - 4080) < 30   # 5280 - 2*600 (N/S setback)
+
+
+def _rect_parcel(w_ft, h_ft):
+    from shapely.affinity import scale
+    sq = synthetic_section(5280.0)
+    return scale(sq, xfact=w_ft / 5280.0, yfact=h_ft / 5280.0, origin=sq.centroid)
+
+
+def test_objective_max_count_vs_max_lateral():
+    parcel = _rect_parcel(10560, 5280)  # 2 mi (E-W) x 1 mi (N-S)
+    base = dict(formation="X", target_tvd_ft=1.0, spacing_ft=880, setback_ft=200, min_lateral_ft=4000)
+    lat_w, _, lat_f = generate_scenario(parcel, ScenarioParams(objective="max_lateral", **base))
+    cnt_w, _, cnt_f = generate_scenario(parcel, ScenarioParams(objective="max_count", **base))
+    # max_count fits more (shorter) laterals; max_lateral runs the long axis -> longer
+    assert cnt_f.legs > lat_f.legs
+    avg_lat = sum(w.legs[0].length_ft for w in lat_w) / len(lat_w)
+    avg_cnt = sum(w.legs[0].length_ft for w in cnt_w) / len(cnt_w)
+    assert avg_lat > avg_cnt
