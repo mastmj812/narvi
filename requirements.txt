@@ -1,0 +1,6 @@
+shapely>=2.0
+numpy>=1.24
+pyshp>=2.3
+pyproj>=3.5
+matplotlib>=3.7
+pytest>=7.0
