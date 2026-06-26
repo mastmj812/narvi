@@ -4,7 +4,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from narvi import ScenarioParams, generate_scenario, synthetic_section
+from narvi import (
+    ScenarioParams,
+    Zone,
+    generate_scenario,
+    generate_wine_rack,
+    synthetic_section,
+)
 
 
 def _params(**kw):
@@ -74,3 +80,23 @@ def test_uturn_below_floor_falls_back_to_singles():
     wells, _, feas = generate_scenario(parcel, _params(well_type="uturn", spacing_ft=880))
     assert wells and all(w.well_type == "single" for w in wells)
     assert "floor" in feas.note
+
+
+def test_wine_rack_stagger_and_interzone_offset():
+    parcel = synthetic_section()
+    base = _params(well_type="single")  # 880 ft spacing -> stagger 440
+    zones = [Zone("WCA_1", 11500), Zone("WCA_2", 11700)]  # dTVD 200
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+
+    assert len(rep.zones) == 2
+    assert rep.stagger_ft == 440  # spacing / 2
+    z_shallow = next(z for z in rep.zones if z.target_tvd_ft == 11500)
+    z_deep = next(z for z in rep.zones if z.target_tvd_ft == 11700)
+    assert z_shallow.stagger_offset_ft == 0
+    assert z_deep.stagger_offset_ft == 440
+    # wine-rack diagonal = sqrt(stagger^2 + dTVD^2) = sqrt(440^2 + 200^2)
+    assert abs(rep.min_interzone_offset_ft - math.hypot(440, 200)) < 1
+    assert rep.min_interzone_offset_ok  # 483 ft >= 300 ft min
+    # the deep zone's legs sit 440 ft off the shallow zone's (mod spacing)
+    deep_x = {round(leg.gunbarrel_x_ft) for w in wells if w.target_tvd_ft == 11700 for leg in w.legs}
+    assert all(abs((x % 880) - 440) < 1 for x in deep_x)

@@ -54,10 +54,12 @@ def laterals_rotated(
     azimuth_deg: float,
     spacing_ft: float,
     min_lateral_ft: float,
+    row_offset_ft: float = 0.0,
 ) -> tuple[list[tuple[float, float, float]], Point, float, float]:
     """Place parallel rows along `azimuth_deg`. Returns (legs, centroid, phi, y_mid)
     where legs = [(y, x_heel, x_toe), ...] in the rotated frame (azimuth -> +x),
-    sorted by y. Map a rotated point back to the work CRS with unrotate()."""
+    sorted by y. `row_offset_ft` phase-shifts the rows (the wine-rack stagger across
+    zones). Map a rotated point back to the work CRS with unrotate()."""
     if window.is_empty:
         return [], window.centroid, 0.0, 0.0
 
@@ -69,10 +71,13 @@ def laterals_rotated(
     min_m = min_lateral_ft / FT_PER_M
     y_mid = (miny + maxy) / 2.0
 
-    n_each = int(((maxy - miny) / 2.0) // spacing_m)
+    # rows at y_mid + offset + k*spacing, k chosen to span the whole window
+    base = y_mid + row_offset_ft / FT_PER_M
+    k_lo = math.ceil((miny - base) / spacing_m)
+    k_hi = math.floor((maxy - base) / spacing_m)
     legs: list[tuple[float, float, float]] = []
-    for k in range(-n_each, n_each + 1):
-        y = y_mid + k * spacing_m
+    for k in range(k_lo, k_hi + 1):
+        y = base + k * spacing_m
         seg = _longest_segment(LineString([(minx - 10.0, y), (maxx + 10.0, y)]).intersection(rot))
         if seg is None or seg.length < min_m:
             continue

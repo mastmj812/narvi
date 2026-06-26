@@ -88,3 +88,34 @@ class Feasibility:
     total_completed_ft: float
     total_drilled_ft: float
     note: str = ""
+
+
+@dataclass
+class Zone:
+    """One target bench in a wine-rack stack."""
+
+    formation: str          # formation_blueox code
+    target_tvd_ft: float    # median landing TVD (parameter for now; warehouse later)
+
+
+@dataclass
+class ZoneResult:
+    formation: str
+    target_tvd_ft: float
+    stagger_offset_ft: float   # cross-section phase shift applied to this zone
+    wells: int
+    legs: int
+
+
+@dataclass
+class WineRackReport:
+    zones: list[ZoneResult]
+    total_wells: int
+    total_legs: int
+    total_completed_ft: float
+    stagger_ft: float
+    # min 3-D distance between legs of any two ADJACENT zones (the wine-rack
+    # diagonal): sqrt(horizontal_offset^2 + delta_TVD^2). Flags a frac-hit risk.
+    min_interzone_offset_ft: float
+    min_interzone_offset_ok: bool
+    note: str = ""

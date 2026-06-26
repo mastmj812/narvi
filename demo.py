@@ -5,6 +5,7 @@
     python demo.py deals.zip "hecker"       # one named parcel from a multi-deal bundle
     python demo.py deals.zip "hecker" 80    # ...with an explicit azimuth (else auto)
     python demo.py deals.zip "hecker" uturn # ...as U-turn wells (else single)
+    python demo.py winerack uturn           # multi-zone wine-rack + gun-barrel cross-section
     python demo.py deals.zip                # list the deal names in a bundle
 
 Tweak the ScenarioParams below to explore spacing / azimuth / setback.
@@ -26,11 +27,18 @@ from shapely.geometry import MultiPolygon
 
 from narvi import (
     ScenarioParams,
+    Zone,
     generate_scenario,
+    generate_wine_rack,
     load_named_parcels,
     load_parcel_zip,
     synthetic_section,
 )
+
+# A placeholder Delaware bench stack for the wine-rack demo (TVDs are parameters;
+# Phase 4 sources them from curated.wells median landing TVD per formation_blueox).
+_DEMO_ZONES = [Zone("AVA_2", 9500), Zone("BS2_S", 10500), Zone("WCA_1", 11500), Zone("WCA_2", 11700)]
+_PALETTE = ["#f97316", "#2563eb", "#10b981", "#a855f7", "#dc2626", "#0891b2", "#eab308", "#db2777"]
 
 
 def _plot(parcel, window, wells, path: str, label: str) -> None:
@@ -58,8 +66,37 @@ def _plot(parcel, window, wells, path: str, label: str) -> None:
     print(f"  wrote {path}")
 
 
+def _plot_gunbarrel(wells, path: str, title: str) -> None:
+    """Cross-section (looking down the lateral axis): each leg a dot at
+    (cross-section offset, TVD), colored by bench; U-turn pairs linked by a bar;
+    the inter-zone wine-rack stagger is visible as the horizontal phase shift."""
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    forms = sorted({w.formation for w in wells},
+                   key=lambda f: min(w.target_tvd_ft for w in wells if w.formation == f))
+    color = {f: _PALETTE[i % len(_PALETTE)] for i, f in enumerate(forms)}
+    for w in wells:
+        c = color[w.formation]
+        if w.turn:  # link the two legs of a U-turn at their TVD
+            xa, xb = w.legs[0].gunbarrel_x_ft, w.legs[1].gunbarrel_x_ft
+            ax.plot([xa, xb], [w.target_tvd_ft, w.target_tvd_ft], color=c, lw=0.8, alpha=0.5, zorder=2)
+        for leg in w.legs:
+            ax.scatter(leg.gunbarrel_x_ft, w.target_tvd_ft, color=c, s=20, zorder=3)
+    handles = [plt.Line2D([], [], marker="o", ls="", color=color[f], label=f) for f in forms]
+    ax.legend(handles=handles, fontsize=8, loc="upper right", title="bench")
+    ax.invert_yaxis()  # deeper = lower
+    ax.set_xlabel("cross-section offset (ft)")
+    ax.set_ylabel("TVD (ft)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.2)
+    fig.savefig(path, dpi=110, bbox_inches="tight")
+    print(f"  wrote {path}")
+
+
 def main() -> None:
     args = list(sys.argv[1:])
+    winerack = "winerack" in args
+    if winerack:
+        args.remove("winerack")
     well_type = "single"
     for wt in ("uturn", "single"):
         if wt in args:
@@ -92,6 +129,22 @@ def main() -> None:
             parcel, label = parcels[key], key
         else:
             parcel, label = load_parcel_zip(data), os.path.basename(args[0])
+
+    if winerack:
+        spacing = 1400.0 if well_type == "uturn" else 880.0  # U-turns need >= 990 leg-to-leg
+        base = ScenarioParams(formation="", target_tvd_ft=0.0, azimuth_deg=azimuth,
+                              well_type=well_type, spacing_ft=spacing, setback_ft=200, min_lateral_ft=4000)
+        wells, window, rep = generate_wine_rack(parcel, base, _DEMO_ZONES)
+        print(f"parcel: {label}  ({parcel.area / 4046.8564224:.0f} ac)")
+        print(f"wine-rack: {rep.note}")
+        for z in rep.zones:
+            print(f"  {z.formation:6} @ {z.target_tvd_ft:>6.0f} ft TVD: {z.wells:2} wells / {z.legs:2} legs  "
+                  f"(stagger {z.stagger_offset_ft:.0f} ft)")
+        tag = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") + f"_winerack_{well_type}"
+        d = os.path.dirname(__file__)
+        _plot(parcel, window, wells, os.path.join(d, f"planview_{tag}.png"), f"{label} wine-rack ({well_type})")
+        _plot_gunbarrel(wells, os.path.join(d, f"gunbarrel_{tag}.png"), f"{label} wine-rack — gun-barrel")
+        return
 
     p = ScenarioParams(
         formation="WCA_1", target_tvd_ft=11500, azimuth_deg=azimuth, well_type=well_type,

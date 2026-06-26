@@ -10,6 +10,7 @@ uturn : adjacent legs are paired into U-turns — two parallel legs joined at th
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 from pyproj import CRS, Transformer
 from shapely.geometry.base import BaseGeometry
@@ -22,7 +23,16 @@ from .placement import (
     laterals_rotated,
     unrotate,
 )
-from .records import Feasibility, InventoryWell, Leg, ScenarioParams, Turn
+from .records import (
+    Feasibility,
+    InventoryWell,
+    Leg,
+    ScenarioParams,
+    Turn,
+    WineRackReport,
+    Zone,
+    ZoneResult,
+)
 
 _to_wgs = Transformer.from_crs(
     CRS.from_epsg(WORK_EPSG), CRS.from_epsg(4326), always_xy=True
@@ -100,12 +110,13 @@ def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n) -> InventoryWell 
 
 
 def generate_scenario(
-    parcel: BaseGeometry, p: ScenarioParams
+    parcel: BaseGeometry, p: ScenarioParams, row_offset_ft: float = 0.0
 ) -> tuple[list[InventoryWell], BaseGeometry, Feasibility]:
     az = p.azimuth_deg if p.azimuth_deg is not None else dominant_azimuth(parcel)
     auto = p.azimuth_deg is None
     window = drillable_window(parcel, p.setback_ft)
-    legs, centroid, phi, y_mid = laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft)
+    legs, centroid, phi, y_mid = laterals_rotated(
+        window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft)
     spacing_m = p.spacing_ft / FT_PER_M
 
     # U-turn leg-to-leg = the leg spacing here; a turn tighter than the floor is
@@ -147,3 +158,61 @@ def generate_scenario(
                  f"floor -> singles]" if floored else "")),
     )
     return wells, window, feas
+
+
+def _interzone_offset_ft(stagger_ft, spacing_ft, d_tvd_ft, off_a, off_b) -> float:
+    """3-D distance between the nearest legs of two adjacent zones: the wine-rack
+    diagonal sqrt(horizontal^2 + dTVD^2). Horizontal = the row-phase difference
+    folded into [0, spacing/2]."""
+    phase = abs(off_a - off_b) % spacing_ft
+    horiz = min(phase, spacing_ft - phase)
+    return math.hypot(horiz, d_tvd_ft)
+
+
+def generate_wine_rack(
+    parcel: BaseGeometry,
+    base: ScenarioParams,
+    zones: list[Zone],
+    stagger_ft: float | None = None,
+    min_interzone_offset_ft: float = 300.0,
+) -> tuple[list[InventoryWell], BaseGeometry, WineRackReport]:
+    """Stack benches into a wine-rack: each zone placed at its TVD, adjacent zones
+    phase-shifted by `stagger_ft` (default spacing/2). Vertical separation between
+    zones = the difference in their (median) landing TVDs."""
+    stagger = base.spacing_ft / 2.0 if stagger_ft is None else stagger_ft
+    zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
+
+    all_wells: list[InventoryWell] = []
+    zresults: list[ZoneResult] = []
+    offsets: list[float] = []
+    window: BaseGeometry | None = None
+    for i, z in enumerate(zs):
+        off = (i % 2) * stagger                       # alternate by depth
+        offsets.append(off)
+        p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft)
+        wells, window, feas = generate_scenario(parcel, p, row_offset_ft=off)
+        all_wells.extend(wells)
+        zresults.append(ZoneResult(z.formation, z.target_tvd_ft, off, len(wells), feas.legs))
+
+    min_off = float("inf")
+    for i in range(len(zs) - 1):
+        d_tvd = abs(zs[i].target_tvd_ft - zs[i + 1].target_tvd_ft)
+        min_off = min(min_off, _interzone_offset_ft(stagger, base.spacing_ft, d_tvd,
+                                                    offsets[i], offsets[i + 1]))
+    finite = min_off != float("inf")
+    ok = (not finite) or min_off >= min_interzone_offset_ft
+
+    total_wells = sum(z.wells for z in zresults)
+    total_legs = sum(z.legs for z in zresults)
+    report = WineRackReport(
+        zones=zresults, total_wells=total_wells, total_legs=total_legs,
+        total_completed_ft=round(sum(w.completed_lateral_ft for w in all_wells), 1),
+        stagger_ft=stagger,
+        min_interzone_offset_ft=round(min_off, 1) if finite else None,
+        min_interzone_offset_ok=ok,
+        note=(f"{len(zs)} zones / {total_wells} wells / {total_legs} legs; stagger "
+              f"{stagger:.0f} ft; min inter-zone offset "
+              f"{('%.0f ft' % min_off) if finite else 'n/a'}"
+              + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")),
+    )
+    return all_wells, window, report
