@@ -53,7 +53,7 @@ def main() -> None:
         src = "synthetic 1-mile section"
 
     p = ScenarioParams(
-        formation="WCA_1", target_tvd_ft=11500, azimuth_deg=0.0,
+        formation="WCA_1", target_tvd_ft=11500,  # azimuth_deg omitted -> auto from parcel
         spacing_ft=880, setback_ft=200, min_lateral_ft=4000,
     )
     wells, window, feas = generate_scenario(parcel, p)

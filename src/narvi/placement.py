@@ -10,11 +10,27 @@ the rows whose drillable span meets the minimum length, then rotate back.
 
 from __future__ import annotations
 
+import math
+
 from shapely.affinity import rotate
 from shapely.geometry import LineString, MultiLineString
 from shapely.geometry.base import BaseGeometry
 
 from .records import FT_PER_M
+
+
+def dominant_azimuth(parcel: BaseGeometry) -> float:
+    """Compass bearing (deg, 0-180) of the parcel's long axis, from its minimum
+    rotated rectangle. A dependency-free stand-in for the RRC survey-section grid
+    until the survey shapefiles are wired (Phase 4): for a section-shaped parcel
+    the long edge tracks the grid, so laterals laid along it stay full-length
+    instead of getting clipped by a tilted boundary."""
+    rect = parcel.minimum_rotated_rectangle
+    pts = list(rect.exterior.coords)[:4]
+    edges = [(pts[i], pts[i + 1]) for i in range(3)]
+    (x0, y0), (x1, y1) = max(edges, key=lambda e: math.dist(e[0], e[1]))
+    # compass azimuth = atan2(east, north); undirected, so fold into [0, 180)
+    return math.degrees(math.atan2(x1 - x0, y1 - y0)) % 180.0
 
 
 def drillable_window(parcel: BaseGeometry, setback_ft: float) -> BaseGeometry:

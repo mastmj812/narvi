@@ -23,9 +23,11 @@ class ScenarioParams:
 
     formation: str            # formation_blueox code (e.g. WCA_1)
     target_tvd_ft: float      # landing TVD
-    azimuth_deg: float        # lateral azimuth, compass degrees clockwise from north
     spacing_ft: float         # leg-to-leg spacing
     setback_ft: float         # uniform boundary setback (slice 1; asymmetric later)
+    # lateral azimuth (compass deg cw from N). None => auto from the parcel's
+    # long axis (dominant_azimuth) as a stand-in for the RRC section grid.
+    azimuth_deg: float | None = None
     min_lateral_ft: float = 4000.0
     scenario_id: str = "s1"
     deal_id: str = "demo"

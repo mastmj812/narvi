@@ -11,7 +11,7 @@ from pyproj import CRS, Transformer
 from shapely.geometry.base import BaseGeometry
 
 from .parcel import WORK_EPSG
-from .placement import FT_PER_M, drillable_window, place_single_laterals
+from .placement import FT_PER_M, dominant_azimuth, drillable_window, place_single_laterals
 from .records import Feasibility, InventoryWell, ScenarioParams
 
 _to_wgs = Transformer.from_crs(
@@ -22,8 +22,12 @@ _to_wgs = Transformer.from_crs(
 def generate_scenario(
     parcel: BaseGeometry, p: ScenarioParams
 ) -> tuple[list[InventoryWell], BaseGeometry, Feasibility]:
+    # Resolve azimuth: explicit override, else the parcel's long-axis bearing.
+    az = p.azimuth_deg if p.azimuth_deg is not None else dominant_azimuth(parcel)
+    auto = p.azimuth_deg is None
+
     window = drillable_window(parcel, p.setback_ft)
-    placed = place_single_laterals(window, p.azimuth_deg, p.spacing_ft, p.min_lateral_ft)
+    placed = place_single_laterals(window, az, p.spacing_ft, p.min_lateral_ft)
 
     wells: list[InventoryWell] = []
     for i, (seg, gbx) in enumerate(placed):
@@ -38,7 +42,7 @@ def generate_scenario(
                 well_type="single",
                 formation=p.formation,
                 target_tvd_ft=p.target_tvd_ft,
-                lateral_azimuth_deg=p.azimuth_deg,
+                lateral_azimuth_deg=round(az, 1),
                 heel_xy=heel,
                 toe_xy=toe,
                 heel_lonlat=tuple(round(c, 6) for c in _to_wgs(*heel)),
@@ -56,6 +60,7 @@ def generate_scenario(
         placed=len(wells),
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
         note=(f"{len(wells)} {p.formation} single laterals at {p.spacing_ft:.0f} ft "
-              f"spacing / {p.setback_ft:.0f} ft setback / {p.azimuth_deg:.0f}° azimuth"),
+              f"spacing / {p.setback_ft:.0f} ft setback / {az:.1f}° azimuth"
+              f"{' (auto)' if auto else ''}"),
     )
     return wells, window, feas
