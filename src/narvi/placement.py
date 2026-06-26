@@ -1,11 +1,13 @@
-"""Geometry core (slice 1): drillable window + parallel single-lateral placement.
+"""Geometry core: drillable window + parallel leg placement.
 
 All geometry is in the work CRS (UTM 13N, metres). Azimuth is the compass bearing
-(clockwise from north) the laterals run along.
+(cw from N) the laterals run along.
 
-Method: rotate the window so the lateral azimuth aligns with +x, lay parallel
-rows `spacing` apart in y, clip each row to the (possibly non-convex) window, keep
-the rows whose drillable span meets the minimum length, then rotate back.
+Method: rotate the window so the azimuth aligns with +x, lay parallel rows
+`spacing` apart in y, clip each to the (possibly non-convex) window, keep the rows
+meeting the minimum length. Leg placement returns the rows IN THE ROTATED FRAME
+(heels at low x, toes at high x) so the generator can build U-turn arcs trivially,
+then map points back with unrotate().
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from __future__ import annotations
 import math
 
 from shapely.affinity import rotate
-from shapely.geometry import LineString, MultiLineString
+from shapely.geometry import LineString, MultiLineString, Point
 from shapely.geometry.base import BaseGeometry
 
 from .records import FT_PER_M
@@ -29,14 +31,11 @@ def dominant_azimuth(parcel: BaseGeometry) -> float:
     pts = list(rect.exterior.coords)[:4]
     edges = [(pts[i], pts[i + 1]) for i in range(3)]
     (x0, y0), (x1, y1) = max(edges, key=lambda e: math.dist(e[0], e[1]))
-    # compass azimuth = atan2(east, north); undirected, so fold into [0, 180)
     return math.degrees(math.atan2(x1 - x0, y1 - y0)) % 180.0
 
 
 def drillable_window(parcel: BaseGeometry, setback_ft: float) -> BaseGeometry:
-    """Inward offset by a uniform setback (slice 1; asymmetric edge-strip later).
-    join_style=2 (mitre) keeps square corners; negative buffer is robust on
-    non-convex parcels and may return a MultiPolygon (handled downstream)."""
+    """Inward offset by a uniform setback (slice 1; asymmetric edge-strip later)."""
     return parcel.buffer(-setback_ft / FT_PER_M, join_style=2)
 
 
@@ -50,20 +49,20 @@ def _longest_segment(geom: BaseGeometry) -> LineString | None:
     return None
 
 
-def place_single_laterals(
+def laterals_rotated(
     window: BaseGeometry,
     azimuth_deg: float,
     spacing_ft: float,
     min_lateral_ft: float,
-) -> list[tuple[LineString, float]]:
-    """Return [(lateral in work CRS, gunbarrel_x_ft), ...] sorted by cross-section
-    offset. gunbarrel_x is the signed perpendicular distance (ft) from the window
-    centroid — the cross-section coordinate for the gun-barrel view."""
+) -> tuple[list[tuple[float, float, float]], Point, float, float]:
+    """Place parallel rows along `azimuth_deg`. Returns (legs, centroid, phi, y_mid)
+    where legs = [(y, x_heel, x_toe), ...] in the rotated frame (azimuth -> +x),
+    sorted by y. Map a rotated point back to the work CRS with unrotate()."""
     if window.is_empty:
-        return []
+        return [], window.centroid, 0.0, 0.0
 
     centroid = window.centroid
-    phi = 90.0 - azimuth_deg                 # compass bearing -> math angle (CCW from +x)
+    phi = 90.0 - azimuth_deg                 # compass bearing -> math angle
     rot = rotate(window, -phi, origin=centroid, use_radians=False)  # laterals -> +x
     minx, miny, maxx, maxy = rot.bounds
     spacing_m = spacing_ft / FT_PER_M
@@ -71,15 +70,20 @@ def place_single_laterals(
     y_mid = (miny + maxy) / 2.0
 
     n_each = int(((maxy - miny) / 2.0) // spacing_m)
-    out: list[tuple[LineString, float]] = []
+    legs: list[tuple[float, float, float]] = []
     for k in range(-n_each, n_each + 1):
         y = y_mid + k * spacing_m
-        row = LineString([(minx - 10.0, y), (maxx + 10.0, y)])
-        seg = _longest_segment(row.intersection(rot))
+        seg = _longest_segment(LineString([(minx - 10.0, y), (maxx + 10.0, y)]).intersection(rot))
         if seg is None or seg.length < min_m:
             continue
-        seg_work = rotate(seg, phi, origin=centroid, use_radians=False)  # back to work CRS
-        out.append((seg_work, (y - y_mid) * FT_PER_M))
+        xs = [c[0] for c in seg.coords]
+        legs.append((y, min(xs), max(xs)))  # heel = low x (west), toe = high x (east)
 
-    out.sort(key=lambda t: t[1])
-    return out
+    legs.sort(key=lambda t: t[0])
+    return legs, centroid, phi, y_mid
+
+
+def unrotate(x: float, y: float, centroid: Point, phi: float) -> tuple[float, float]:
+    """Map a rotated-frame point back to the work CRS."""
+    p = rotate(Point(x, y), phi, origin=centroid, use_radians=False)
+    return (p.x, p.y)

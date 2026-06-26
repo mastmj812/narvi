@@ -2,7 +2,7 @@
 
 from .generate import generate_scenario
 from .parcel import load_named_parcels, load_parcel_zip, synthetic_section
-from .records import Feasibility, InventoryWell, ScenarioParams
+from .records import Feasibility, InventoryWell, Leg, ScenarioParams, Turn
 
 __all__ = [
     "generate_scenario",
@@ -11,5 +11,7 @@ __all__ = [
     "synthetic_section",
     "Feasibility",
     "InventoryWell",
+    "Leg",
     "ScenarioParams",
+    "Turn",
 ]
