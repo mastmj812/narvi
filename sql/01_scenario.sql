@@ -79,31 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_narvi_inv_well_legs
 CREATE INDEX IF NOT EXISTS idx_narvi_inv_well_formation
     ON narvi.inventory_well (formation);
 
--- -----------------------------------------------------------------------------
--- well_forecast — a production forecast + EUR per planned well, per SOURCE.
--- Keyed (deal, scenario, well_name, source) so the Novi-intel ML forecast and
--- the narvi analog type curve coexist for side-by-side comparison before one is
--- chosen for valuation. The monthly stream lives in `series` jsonb (the app
--- charts it); EURs are columns for cheap rollups.
--- -----------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS narvi.well_forecast (
-    forecast_uid    BIGSERIAL PRIMARY KEY,
-    deal_id         TEXT NOT NULL,
-    scenario_id     TEXT NOT NULL,
-    well_name       TEXT NOT NULL,
-    source          TEXT NOT NULL,           -- 'novi_intel' | 'narvi_analog'
-    eur_oil_bbl     DOUBLE PRECISION,
-    eur_gas_mcf     DOUBLE PRECISION,
-    eur_water_bbl   DOUBLE PRECISION,
-    eur_ngl_bbl     DOUBLE PRECISION,
-    eur_boe         DOUBLE PRECISION,
-    horizon_months  INTEGER,
-    series          JSONB,                   -- {months:[], oil:[], gas:[], water:[]}
-    match           JSONB,                   -- provenance / match quality
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (deal_id, scenario_id, well_name, source),
-    FOREIGN KEY (deal_id, scenario_id)
-        REFERENCES narvi.scenario (deal_id, scenario_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_narvi_well_forecast_scenario
-    ON narvi.well_forecast (deal_id, scenario_id, source);
+-- NOTE: production forecasting is intentionally NOT narvi's job — narvi hands the
+-- inventory (narvi.scenario + narvi.inventory_well) off, and the forecast is
+-- produced downstream (anduin for PDP-control type curves, erebor for Novi-intel
+-- ML). A forecast-of-narvi-inventory table is owned by that downstream tool.
