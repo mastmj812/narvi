@@ -4,3 +4,6 @@ pyshp>=2.3
 pyproj>=3.5
 matplotlib>=3.7
 pytest>=7.0
+# warehouse data layer (narvi.warehouse) — DB-sourced landing TVD / azimuth
+psycopg[binary]>=3.1
+python-dotenv>=1.0

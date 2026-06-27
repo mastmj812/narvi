@@ -1,4 +1,8 @@
-"""Narvi geometry core — inventory-well scenario generator (Phase 0 library)."""
+"""Narvi geometry core — inventory-well scenario generator (Phase 0 library).
+
+The geometry core (generate / parcel / placement / records) is DB-free. The
+warehouse data layer (`narvi.warehouse`) is imported separately so that the core
+stays importable without psycopg / a live connection."""
 
 from .generate import generate_scenario, generate_wine_rack
 from .parcel import load_named_parcels, load_parcel_zip, synthetic_section

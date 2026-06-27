@@ -6,6 +6,7 @@
     python demo.py deals.zip "hecker" 80    # ...with an explicit azimuth (else auto)
     python demo.py deals.zip "hecker" uturn # ...as U-turn wells (else single)
     python demo.py winerack uturn           # multi-zone wine-rack + gun-barrel cross-section
+    python demo.py deals.zip "hecker" winerack warehouse  # zones from the warehouse (real TVDs)
     python demo.py deals.zip                # list the deal names in a bundle
 
 Tweak the ScenarioParams below to explore spacing / azimuth / setback.
@@ -35,9 +36,12 @@ from narvi import (
     synthetic_section,
 )
 
-# A placeholder Delaware bench stack for the wine-rack demo (TVDs are parameters;
-# Phase 4 sources them from curated.wells median landing TVD per formation_blueox).
+# A placeholder Delaware bench stack for the wine-rack demo (TVDs are parameters
+# unless `warehouse` mode is on, which sources median landing TVD per
+# formation_blueox from curated.wells_enriched in the AOI).
 _DEMO_ZONES = [Zone("AVA_2", 9500), Zone("BS2_S", 10500), Zone("WCA_1", 11500), Zone("WCA_2", 11700)]
+# benches requested when sourcing zones from the warehouse (shallow -> deep Delaware)
+_WAREHOUSE_STACK = ["AVA_0", "BS2_S", "BS3_C", "WCXY", "WCA_1", "WCA_2", "WCB_1", "WCC"]
 _PALETTE = ["#f97316", "#2563eb", "#10b981", "#a855f7", "#dc2626", "#0891b2", "#eab308", "#db2777"]
 
 
@@ -97,6 +101,9 @@ def main() -> None:
     winerack = "winerack" in args
     if winerack:
         args.remove("winerack")
+    warehouse = "warehouse" in args
+    if warehouse:
+        args.remove("warehouse")
     maxcount = "maxcount" in args
     if maxcount:
         args.remove("maxcount")
@@ -139,7 +146,22 @@ def main() -> None:
         base = ScenarioParams(formation="", target_tvd_ft=0.0, azimuth_deg=azimuth,
                               well_type=well_type, objective=objective, spacing_ft=spacing,
                               setback_ft=200, min_lateral_ft=4000)
-        wells, window, rep = generate_wine_rack(parcel, base, _DEMO_ZONES)
+        zones = _DEMO_ZONES
+        if warehouse:  # source real median landing TVDs per bench from the warehouse
+            from narvi.warehouse import get_connection, zones_from_warehouse
+            conn = get_connection()
+            try:
+                zones, stats = zones_from_warehouse(
+                    conn, parcel, _WAREHOUSE_STACK, buffer_ft=5280.0, split_multimodal=True)
+            finally:
+                conn.close()
+            print("warehouse TVD sourcing:")
+            for st in stats:
+                print(f"  {st.note}")
+            if not zones:
+                print("no benches with sufficient control in the AOI; aborting.")
+                return
+        wells, window, rep = generate_wine_rack(parcel, base, zones)
         print(f"parcel: {label}  ({parcel.area / 4046.8564224:.0f} ac)")
         print(f"wine-rack: {rep.note}")
         for z in rep.zones:
