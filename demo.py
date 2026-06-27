@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
@@ -147,17 +148,26 @@ def main() -> None:
                               well_type=well_type, objective=objective, spacing_ft=spacing,
                               setback_ft=200, min_lateral_ft=4000)
         zones = _DEMO_ZONES
-        if warehouse:  # source real median landing TVDs per bench from the warehouse
-            from narvi.warehouse import get_connection, zones_from_warehouse
+        if warehouse:  # source real median landing TVDs + the section-grid azimuth
+            from narvi.warehouse import (
+                get_connection,
+                lateral_azimuth_stats,
+                zones_from_warehouse,
+            )
             conn = get_connection()
             try:
                 zones, stats = zones_from_warehouse(
                     conn, parcel, _WAREHOUSE_STACK, buffer_ft=5280.0, split_multimodal=True)
+                az_stats = lateral_azimuth_stats(conn, parcel, buffer_ft=5280.0)
             finally:
                 conn.close()
             print("warehouse TVD sourcing:")
             for st in stats:
                 print(f"  {st.note}")
+            print(f"warehouse azimuth: {az_stats.note}")
+            if azimuth is None and az_stats.confident:  # adopt the grid azimuth
+                base = replace(base, azimuth_deg=az_stats.azimuth_deg)
+                print(f"  -> using grid azimuth {az_stats.azimuth_deg:.1f}°")
             if not zones:
                 print("no benches with sufficient control in the AOI; aborting.")
                 return

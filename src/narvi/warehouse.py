@@ -7,8 +7,11 @@ turns hand-typed scenario inputs into data-driven ones:
 
   * landing TVD per `formation_blueox` from offset wells in the AOI (median +
     spread + a multimodality flag that warns when one bench code is hiding two
-    distinct landing targets), and
-  * a ready-to-use `Zone` list for `generate_wine_rack`.
+    distinct landing targets),
+  * a ready-to-use `Zone` list for `generate_wine_rack`, and
+  * the section-grid azimuth, derived from the actual lateral bearings of nearby
+    horizontal wells (the ground truth for how operators align to the survey
+    grid) — more robust than the parcel's own long axis on irregular DSUs.
 
 Connection mirrors engineering_db/etl/db.py: env-var credentials from a
 gitignored `.env`, with Supabase session settings (statement_timeout=0,
@@ -22,6 +25,7 @@ buffer is a true metric distance.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -51,6 +55,16 @@ _BIMODAL_MIN_FRAC = 0.20   # each cluster must hold >= 20% of the wells
 # remain; below that floor the bench is too permit-contaminated to filter, so we
 # fall back to all wells and flag it instead of silently trusting round numbers.
 _PERMIT_MIN_REAL = 3       # keep real-depth stats only if >= this many remain
+
+# Section-grid azimuth from offset laterals. Wells in a development block are
+# drilled parallel to the survey grid, so their lateral bearings are a tight,
+# coherent population — UNLESS the AOI straddles two survey blocks with different
+# grid rotations, in which case the bearings scatter. Coherence R (mean resultant
+# length, 0..1) measures that tightness; below the floor we don't trust a single
+# grid azimuth and fall back to the parcel's own long axis.
+_AZIMUTH_MIN_COHERENCE = 0.85
+_AZIMUTH_MIN_WELLS = 3
+_AZIMUTH_MIN_LATERAL_M = 500.0   # ignore near-coincident LP/BHL (vertical/sidetrack noise)
 
 
 _SESSION_SETTINGS: tuple[str, ...] = (
@@ -277,3 +291,95 @@ def zones_from_warehouse(
             zones.append(Zone(formation=f, target_tvd_ft=st.median_tvd_ft))
     zones.sort(key=lambda z: z.target_tvd_ft)
     return zones, stats
+
+
+@dataclass
+class AzimuthStats:
+    """Section-grid azimuth from offset laterals in an AOI (+ buffer)."""
+
+    wells: int
+    azimuth_deg: float | None   # axial bearing folded to [0, 180); None if no control
+    coherence: float            # mean resultant length R in [0,1] (grid tightness)
+    circ_std_deg: float | None  # circular std of the (axial) bearings, degrees
+    confident: bool             # coherence >= floor AND enough wells
+    note: str = ""
+
+
+def lateral_azimuth_stats(
+    conn: psycopg.Connection,
+    parcel: BaseGeometry,
+    buffer_ft: float = 5280.0,
+    formation: str | None = None,
+) -> AzimuthStats:
+    """Dominant lateral azimuth of horizontal wells whose stick lies within
+    `buffer_ft` of the AOI, from each well's landing-point -> bottom-hole bearing
+    (the producing-leg direction). This is the operative survey-grid azimuth.
+
+    Azimuth is AXIAL — a lateral and its reverse describe the same grid line — so
+    the average is a circular mean of the DOUBLED angles, folded back to
+    [0, 180). The mean resultant length R is reported as `coherence`: ~1 means a
+    tight, single-grid block; a low value means the AOI straddles survey blocks
+    with different rotations (don't trust one azimuth). `formation` is normally
+    left None — the grid doesn't change by bench, so all benches maximise the
+    sample."""
+    aoi = parcel_to_ewkt_4326(parcel)
+    buffer_m = buffer_ft / FT_PER_M
+    clauses = [
+        "w.is_horizontal",
+        "w.landing_point_lat IS NOT NULL", "w.landing_point_lon IS NOT NULL",
+        "w.bhl_lat IS NOT NULL", "w.bhl_lon IS NOT NULL",
+        "w.wellstick_geom IS NOT NULL",
+        "ST_DWithin(w.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buffer_m)s)",
+        # require a real lateral (LP and BHL far enough apart for a meaningful bearing)
+        "ST_Distance(ST_SetSRID(ST_MakePoint(w.landing_point_lon, w.landing_point_lat),4326)::geography,"
+        " ST_SetSRID(ST_MakePoint(w.bhl_lon, w.bhl_lat),4326)::geography) >= %(min_lat_m)s",
+    ]
+    params: dict = {"aoi": aoi, "buffer_m": buffer_m, "min_lat_m": _AZIMUTH_MIN_LATERAL_M}
+    if formation is not None:
+        clauses.append("w.formation_blueox = %(formation)s")
+        params["formation"] = formation
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT degrees(ST_Azimuth("
+            "  ST_SetSRID(ST_MakePoint(w.landing_point_lon, w.landing_point_lat),4326)::geography,"
+            "  ST_SetSRID(ST_MakePoint(w.bhl_lon, w.bhl_lat),4326)::geography))::float "
+            "FROM curated.wells_enriched w WHERE " + " AND ".join(clauses),
+            params,
+        )
+        bearings = [row[0] for row in cur.fetchall() if row[0] is not None]
+
+    n = len(bearings)
+    if n == 0:
+        return AzimuthStats(wells=0, azimuth_deg=None, coherence=0.0, circ_std_deg=None,
+                            confident=False,
+                            note=f"no horizontal laterals within {buffer_ft:.0f} ft of the AOI")
+
+    # axial circular mean: double the angles so 10 deg and 190 deg reinforce
+    s = sum(math.sin(math.radians(2 * b)) for b in bearings) / n
+    c = sum(math.cos(math.radians(2 * b)) for b in bearings) / n
+    R = math.hypot(s, c)                                   # mean resultant length
+    az = (math.degrees(math.atan2(s, c)) / 2.0) % 180.0    # fold back to [0,180)
+    # circular std (Mardia) on the axial scale, reported in real (halved) degrees
+    circ_std = math.degrees(math.sqrt(-2.0 * math.log(R))) / 2.0 if R > 1e-9 else None
+    confident = n >= _AZIMUTH_MIN_WELLS and R >= _AZIMUTH_MIN_COHERENCE
+    note = (f"{n} laterals; grid azimuth {az:.1f}° "
+            f"(coherence {R:.2f}"
+            + (f", circ-std {circ_std:.1f}°" if circ_std is not None else "") + ")")
+    if not confident:
+        note += (f"  [LOW COHERENCE < {_AZIMUTH_MIN_COHERENCE:.2f} — likely straddling survey "
+                 f"blocks; fall back to the parcel long axis]" if n >= _AZIMUTH_MIN_WELLS
+                 else f"  [only {n} laterals — too few to trust]")
+    return AzimuthStats(wells=n, azimuth_deg=round(az, 1), coherence=round(R, 3),
+                        circ_std_deg=round(circ_std, 1) if circ_std is not None else None,
+                        confident=confident, note=note)
+
+
+def section_azimuth(
+    conn: psycopg.Connection,
+    parcel: BaseGeometry,
+    buffer_ft: float = 5280.0,
+) -> float | None:
+    """Convenience: the offset-well grid azimuth if it's confident, else None
+    (so the caller falls back to the geometry core's parcel-long-axis default)."""
+    st = lateral_azimuth_stats(conn, parcel, buffer_ft)
+    return st.azimuth_deg if st.confident else None
