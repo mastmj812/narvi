@@ -20,6 +20,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from shapely.geometry.base import BaseGeometry
 
+from .forecast import Forecast
 from .records import InventoryWell, Leg, ScenarioParams, Turn
 from .warehouse import parcel_to_ewkt_4326
 
@@ -266,10 +267,80 @@ def list_scenarios(conn: psycopg.Connection, deal_id: str | None = None) -> list
 
 
 def delete_scenario(conn: psycopg.Connection, deal_id: str, scenario_id: str) -> None:
-    """Delete a scenario and its wells (CASCADE)."""
+    """Delete a scenario and its wells + forecasts (CASCADE)."""
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM narvi.scenario WHERE deal_id = %s AND scenario_id = %s",
             (deal_id, scenario_id),
         )
     conn.commit()
+
+
+def save_forecasts(
+    conn: psycopg.Connection, deal_id: str, scenario_id: str,
+    forecasts: list[Forecast],
+) -> int:
+    """Upsert per-well forecasts for a scenario. Keyed (well, source), so saving
+    the Novi forecasts leaves any analog forecasts intact and vice versa. The
+    scenario must already be persisted (FK). Commits on success."""
+    with conn.cursor() as cur:
+        for fc in forecasts:
+            cur.execute(
+                """
+                INSERT INTO narvi.well_forecast (
+                    deal_id, scenario_id, well_name, source, eur_oil_bbl,
+                    eur_gas_mcf, eur_water_bbl, eur_ngl_bbl, eur_boe,
+                    horizon_months, series, match)
+                VALUES (
+                    %(deal_id)s, %(scenario_id)s, %(well_name)s, %(source)s,
+                    %(eur_oil)s, %(eur_gas)s, %(eur_water)s, %(eur_ngl)s, %(eur_boe)s,
+                    %(horizon)s, %(series)s, %(match)s)
+                ON CONFLICT (deal_id, scenario_id, well_name, source) DO UPDATE SET
+                    eur_oil_bbl = EXCLUDED.eur_oil_bbl, eur_gas_mcf = EXCLUDED.eur_gas_mcf,
+                    eur_water_bbl = EXCLUDED.eur_water_bbl, eur_ngl_bbl = EXCLUDED.eur_ngl_bbl,
+                    eur_boe = EXCLUDED.eur_boe, horizon_months = EXCLUDED.horizon_months,
+                    series = EXCLUDED.series, match = EXCLUDED.match,
+                    created_at = NOW()
+                """,
+                {
+                    "deal_id": deal_id, "scenario_id": scenario_id,
+                    "well_name": fc.well_name, "source": fc.source,
+                    "eur_oil": fc.eur_oil_bbl, "eur_gas": fc.eur_gas_mcf,
+                    "eur_water": fc.eur_water_bbl, "eur_ngl": fc.eur_ngl_bbl,
+                    "eur_boe": fc.eur_boe, "horizon": fc.horizon_months,
+                    "series": Jsonb({"months": fc.months, "oil": fc.oil,
+                                     "gas": fc.gas, "water": fc.water}),
+                    "match": Jsonb(fc.match),
+                },
+            )
+    conn.commit()
+    return len(forecasts)
+
+
+def load_forecasts(
+    conn: psycopg.Connection, deal_id: str, scenario_id: str,
+    source: str | None = None,
+) -> list[Forecast]:
+    """Reload per-well forecasts for a scenario (optionally one source)."""
+    sql = (
+        "SELECT well_name, source, eur_oil_bbl, eur_gas_mcf, eur_water_bbl, "
+        "eur_ngl_bbl, eur_boe, horizon_months, series, match "
+        "FROM narvi.well_forecast WHERE deal_id = %s AND scenario_id = %s "
+    )
+    params: tuple = (deal_id, scenario_id)
+    if source is not None:
+        sql += "AND source = %s "
+        params = (deal_id, scenario_id, source)
+    sql += "ORDER BY well_name, source"
+    out: list[Forecast] = []
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        for r in cur.fetchall():
+            s = r[8] or {}
+            out.append(Forecast(
+                source=r[1], well_name=r[0], eur_oil_bbl=r[2], eur_gas_mcf=r[3],
+                eur_water_bbl=r[4], eur_ngl_bbl=r[5], eur_boe=r[6], horizon_months=r[7],
+                months=s.get("months", []), oil=s.get("oil", []),
+                gas=s.get("gas", []), water=s.get("water", []), match=r[9] or {},
+            ))
+    return out
