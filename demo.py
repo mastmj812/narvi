@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
@@ -97,6 +97,27 @@ def _plot_gunbarrel(wells, path: str, title: str) -> None:
     print(f"  wrote {path}")
 
 
+def _save_scenario(parcel, params, wells, summary, label: str) -> None:
+    """Persist a generated scenario to the warehouse (narvi schema) and echo the
+    deal's saved scenarios."""
+    from narvi import persist
+    from narvi.warehouse import get_connection
+
+    deal_id = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "demo"
+    scenario_id = f"{params.well_type}_{params.objective}"
+    conn = get_connection()
+    try:
+        persist.apply_schema(conn)
+        n = persist.save_scenario(conn, deal_id, scenario_id, parcel, params, wells,
+                                  summary=summary, name=label)
+        print(f"saved {n} wells -> narvi.scenario ({deal_id} / {scenario_id})")
+        for s in persist.list_scenarios(conn, deal_id):
+            print(f"  [{s['scenario_id']}] {s['total_wells']} wells, "
+                  f"{s['total_completed_ft']:,.0f} ft completed, az {s['azimuth_deg']}")
+    finally:
+        conn.close()
+
+
 def main() -> None:
     args = list(sys.argv[1:])
     winerack = "winerack" in args
@@ -105,6 +126,9 @@ def main() -> None:
     warehouse = "warehouse" in args
     if warehouse:
         args.remove("warehouse")
+    save = "save" in args
+    if save:
+        args.remove("save")
     maxcount = "maxcount" in args
     if maxcount:
         args.remove("maxcount")
@@ -181,6 +205,8 @@ def main() -> None:
         d = os.path.dirname(__file__)
         _plot(parcel, window, wells, os.path.join(d, f"planview_{tag}.png"), f"{label} wine-rack ({well_type})")
         _plot_gunbarrel(wells, os.path.join(d, f"gunbarrel_{tag}.png"), f"{label} wine-rack — gun-barrel")
+        if save:
+            _save_scenario(parcel, base, wells, asdict(rep), label)
         return
 
     p = ScenarioParams(
@@ -204,6 +230,8 @@ def main() -> None:
     if azimuth is not None:
         tag += f"_az{int(azimuth)}"
     _plot(parcel, window, wells, os.path.join(os.path.dirname(__file__), f"planview_{tag}.png"), title)
+    if save:
+        _save_scenario(parcel, p, wells, asdict(feas), label)
 
 
 if __name__ == "__main__":
