@@ -1,36 +1,57 @@
-# Narvi — inventory-planning geometry core
+# narvi
 
-Generates well-inventory scenarios (U-turn / single laterals) on a parcel, with
-spatial attributes, for the Blue Ox app stack. Pure-geometry library now
-(Phase 0, no DB); warehouse wiring + app shell + forecaster adapters come in
-Phase 4. See `../narvi_buildout_plan.md` for the full plan.
-
-**Scope:** locations + configuration + forecast only. Economics (deck / LOE /
-capex / commercial terms) is intentionally out of scope — handed downstream.
-
-## Status — slice 1 (single-lateral engine)
-
-- [x] Parcel ingest (deal `.zip` shapefile → UTM 13N) + synthetic section
-- [x] Drillable window (uniform setback)
-- [x] Parallel single-lateral placement at spacing + azimuth, min-length filter
-- [x] Feasibility report + inventory-well records (§5 subset) + gunbarrel x
-- [ ] U-turn geometry (legs + turn arc, DLS, drilled vs completed) — slice 2
-- [ ] Multi-zone wine-rack stagger — slice 3
-- [ ] Asymmetric setbacks (edge-strip), objective toggle — slice 4
-
-## Run the demo
-
-```bash
-.venv/Scripts/python.exe demo.py                  # synthetic 1-mile section
-.venv/Scripts/python.exe demo.py path/to/deal.zip # a real deal shapefile
-```
-
-Writes `demo_planview.png` (plan view: parcel, drillable window, laterals) and
-prints the feasibility + per-well lengths.
+Inventory-planning engine + app for the Permian: generate U-turn / single-lateral
+well-inventory scenarios from a deal parcel, source landing TVD and the survey-grid
+azimuth from the warehouse, persist scenarios, and hand the inventory off to the
+forecasters (anduin type curves / erebor Novi-intel). narvi does **not** forecast —
+it produces locations + configuration. Economics is out of scope (handed downstream).
 
 ## Layout
 
-- `src/narvi/parcel.py` — shapefile/synthetic parcel → UTM 13N (m)
-- `src/narvi/placement.py` — drillable window + lateral placement geometry
-- `src/narvi/generate.py` — parcel + params → inventory wells + feasibility
-- `src/narvi/records.py` — `InventoryWell` / `ScenarioParams` / `Feasibility`
+```
+src/narvi/        the engine (pure-geometry core + DB layers), pip-installable
+  records.py      data contract (ScenarioParams, InventoryWell, Zone, ...)
+  parcel.py       parcel ingest (.zip / synthetic / GeoJSON) + UTM 13N work CRS
+  placement.py    drillable window, rotated-lateral placement, azimuth
+  generate.py     generate_scenario / generate_wine_rack
+  warehouse.py    landing-TVD sourcing + offset-well grid azimuth (reads oilgas)
+  persist.py      scenario persistence (narvi schema: scenario + inventory_well)
+  viz.py          shared map GeoJSON + gun-barrel data + matplotlib renderers
+sql/01_scenario.sql   narvi-schema DDL
+backend/          FastAPI service wrapping the engine (app/api/*)
+demo.py           CLI: generate + render PNGs / GeoJSON
+tests/            engine tests;  backend/tests/   API tests
+```
+
+## Setup
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e .            # the narvi engine
+.\.venv\Scripts\python.exe -m pip install fastapi "uvicorn[standard]" python-multipart httpx
+```
+
+Create `.env` (gitignored) with the warehouse `DB_*` keys (host/port/name/user/password/sslmode).
+
+## Run
+
+```powershell
+.\start.ps1            # backend on :8078 (frontend on :5176 once it exists)
+```
+
+API docs at `http://127.0.0.1:8078/docs`. Key endpoints (all under `/api`):
+`POST /parcels/upload`, `POST /generate`, `POST /warehouse/zones`,
+`POST /warehouse/azimuth`, `GET|POST /scenarios`, `GET|DELETE /scenarios/{deal}/{id}`.
+
+## Demo (CLI)
+
+```powershell
+.\.venv\Scripts\python.exe demo.py                       # synthetic 1-mile section
+.\.venv\Scripts\python.exe demo.py deals.zip "hecker" winerack warehouse geojson
+```
+
+## Test
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q                  # engine + backend (20 tests)
+```

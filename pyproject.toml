@@ -1,0 +1,24 @@
+[project]
+name = "narvi"
+version = "0.1.0"
+description = "Narvi — inventory-planning engine (U-turn/single-lateral scenario generator) for the Permian"
+requires-python = ">=3.12"
+dependencies = [
+    "shapely>=2.0",
+    "numpy>=1.24",
+    "pyshp>=2.3",
+    "pyproj>=3.5",
+    "matplotlib>=3.7",
+    "psycopg[binary]>=3.1",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

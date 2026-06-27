@@ -64,6 +64,16 @@ def load_parcel_zip(data: bytes) -> Polygon | MultiPolygon:
     return shp_transform(_transformer(src, WORK_EPSG), unary_union(polys))
 
 
+def parcel_from_geojson(geom: dict) -> Polygon | MultiPolygon:
+    """A WGS84 GeoJSON (Multi)Polygon geometry -> a parcel in the work CRS (UTM
+    13N, m). The inverse of viz's work->WGS84 transform; lets the app round-trip a
+    parcel the front end holds in lon/lat back into the engine."""
+    g = shape(geom)
+    if g.geom_type not in ("Polygon", "MultiPolygon"):
+        raise ValueError(f"expected a (Multi)Polygon, got {g.geom_type}")
+    return shp_transform(_transformer(CRS.from_epsg(4326), WORK_EPSG), g)
+
+
 def load_named_parcels(data: bytes) -> dict[str, Polygon | MultiPolygon]:
     """Multi-deal bundle -> {label: parcel in UTM 13N}. label = `<dealName> <dsu>`;
     polygons sharing a label are unioned into one parcel."""

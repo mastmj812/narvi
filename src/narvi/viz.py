@@ -68,7 +68,7 @@ def formation_colors(wells: list[InventoryWell]) -> dict[str, str]:
 
 
 def scenario_geojson(
-    parcel: BaseGeometry,
+    parcel: BaseGeometry | None,
     window: BaseGeometry | None,
     wells: list[InventoryWell],
     *,
@@ -76,9 +76,12 @@ def scenario_geojson(
 ) -> dict:
     """A WGS84 GeoJSON FeatureCollection for the plan-view map: the parcel, the
     drillable window, every producing leg (LineString), and every non-producing
-    U-turn arc (LineString). Properties drive styling + popups in the front end."""
+    U-turn arc (LineString). Properties drive styling + popups in the front end.
+    parcel/window may be None (e.g. reloading a saved scenario from its wells)."""
     colors = formation_colors(wells)
-    features: list[dict] = [_polygon_feature(parcel, {"kind": "parcel"})]
+    features: list[dict] = []
+    if parcel is not None:
+        features.append(_polygon_feature(parcel, {"kind": "parcel"}))
     if include_window and window is not None:
         features.append(_polygon_feature(window, {"kind": "window"}))
 
