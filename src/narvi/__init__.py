@@ -16,6 +16,7 @@ from .records import (
     Zone,
     ZoneResult,
 )
+from .viz import gunbarrel_data, scenario_geojson
 
 __all__ = [
     "generate_scenario",
@@ -31,4 +32,6 @@ __all__ = [
     "WineRackReport",
     "Zone",
     "ZoneResult",
+    "scenario_geojson",
+    "gunbarrel_data",
 ]

@@ -7,6 +7,7 @@
     python demo.py deals.zip "hecker" uturn # ...as U-turn wells (else single)
     python demo.py winerack uturn           # multi-zone wine-rack + gun-barrel cross-section
     python demo.py deals.zip "hecker" winerack warehouse  # zones from the warehouse (real TVDs)
+    python demo.py deals.zip "hecker" geojson  # also write a map-ready GeoJSON (WGS84)
     python demo.py deals.zip                # list the deal names in a bundle
 
 Tweak the ScenarioParams below to explore spacing / azimuth / setback.
@@ -14,6 +15,7 @@ Tweak the ScenarioParams below to explore spacing / azimuth / setback.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -24,8 +26,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from shapely.geometry import MultiPolygon
 
 from narvi import (
     ScenarioParams,
@@ -34,8 +34,10 @@ from narvi import (
     generate_wine_rack,
     load_named_parcels,
     load_parcel_zip,
+    scenario_geojson,
     synthetic_section,
 )
+from narvi.viz import gunbarrel_figure, planview_figure
 
 # A placeholder Delaware bench stack for the wine-rack demo (TVDs are parameters
 # unless `warehouse` mode is on, which sources median landing TVD per
@@ -43,57 +45,23 @@ from narvi import (
 _DEMO_ZONES = [Zone("AVA_2", 9500), Zone("BS2_S", 10500), Zone("WCA_1", 11500), Zone("WCA_2", 11700)]
 # benches requested when sourcing zones from the warehouse (shallow -> deep Delaware)
 _WAREHOUSE_STACK = ["AVA_0", "BS2_S", "BS3_C", "WCXY", "WCA_1", "WCA_2", "WCB_1", "WCC"]
-_PALETTE = ["#f97316", "#2563eb", "#10b981", "#a855f7", "#dc2626", "#0891b2", "#eab308", "#db2777"]
 
 
-def _plot(parcel, window, wells, path: str, label: str) -> None:
-    fig, ax = plt.subplots(figsize=(8, 8))
-
-    def ring(geom, **kw):
-        polys = geom.geoms if isinstance(geom, MultiPolygon) else [geom]
-        for poly in polys:
-            xs, ys = poly.exterior.xy
-            ax.plot(xs, ys, **kw)
-
-    ring(parcel, color="#1f2937", lw=1.5, label="parcel")
-    ring(window, color="#2563eb", lw=1.0, ls="--", label="drillable window")
-    for w in wells:
-        for leg in w.legs:  # producing legs (orange)
-            ax.plot([leg.heel_xy[0], leg.toe_xy[0]], [leg.heel_xy[1], leg.toe_xy[1]],
-                    color="#f97316", lw=2)
-        if w.turn:  # non-producing turn arc (violet)
-            ax.plot([pt[0] for pt in w.turn.arc_xy], [pt[1] for pt in w.turn.arc_xy],
-                    color="#a855f7", lw=1.5)
-    ax.set_aspect("equal")
-    ax.set_title(f"{label} — {len(wells)} laterals (UTM 13N m)")
-    ax.legend(loc="upper right", fontsize=8)
+def _save_planview(parcel, window, wells, path: str, title: str) -> None:
+    fig = planview_figure(parcel, window, wells, f"{title} — {len(wells)} laterals")
     fig.savefig(path, dpi=110, bbox_inches="tight")
     print(f"  wrote {path}")
 
 
-def _plot_gunbarrel(wells, path: str, title: str) -> None:
-    """Cross-section (looking down the lateral axis): each leg a dot at
-    (cross-section offset, TVD), colored by bench; U-turn pairs linked by a bar;
-    the inter-zone wine-rack stagger is visible as the horizontal phase shift."""
-    fig, ax = plt.subplots(figsize=(9, 5.5))
-    forms = sorted({w.formation for w in wells},
-                   key=lambda f: min(w.target_tvd_ft for w in wells if w.formation == f))
-    color = {f: _PALETTE[i % len(_PALETTE)] for i, f in enumerate(forms)}
-    for w in wells:
-        c = color[w.formation]
-        if w.turn:  # link the two legs of a U-turn at their TVD
-            xa, xb = w.legs[0].gunbarrel_x_ft, w.legs[1].gunbarrel_x_ft
-            ax.plot([xa, xb], [w.target_tvd_ft, w.target_tvd_ft], color=c, lw=0.8, alpha=0.5, zorder=2)
-        for leg in w.legs:
-            ax.scatter(leg.gunbarrel_x_ft, w.target_tvd_ft, color=c, s=20, zorder=3)
-    handles = [plt.Line2D([], [], marker="o", ls="", color=color[f], label=f) for f in forms]
-    ax.legend(handles=handles, fontsize=8, loc="upper right", title="bench")
-    ax.invert_yaxis()  # deeper = lower
-    ax.set_xlabel("cross-section offset (ft)")
-    ax.set_ylabel("TVD (ft)")
-    ax.set_title(title)
-    ax.grid(True, alpha=0.2)
+def _save_gunbarrel(wells, path: str, title: str) -> None:
+    fig = gunbarrel_figure(wells, title)
     fig.savefig(path, dpi=110, bbox_inches="tight")
+    print(f"  wrote {path}")
+
+
+def _save_geojson(parcel, window, wells, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(scenario_geojson(parcel, window, wells), fh)
     print(f"  wrote {path}")
 
 
@@ -129,6 +97,9 @@ def main() -> None:
     save = "save" in args
     if save:
         args.remove("save")
+    geojson = "geojson" in args
+    if geojson:
+        args.remove("geojson")
     maxcount = "maxcount" in args
     if maxcount:
         args.remove("maxcount")
@@ -203,8 +174,10 @@ def main() -> None:
                   f"(stagger {z.stagger_offset_ft:.0f} ft)")
         tag = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") + f"_winerack_{well_type}"
         d = os.path.dirname(__file__)
-        _plot(parcel, window, wells, os.path.join(d, f"planview_{tag}.png"), f"{label} wine-rack ({well_type})")
-        _plot_gunbarrel(wells, os.path.join(d, f"gunbarrel_{tag}.png"), f"{label} wine-rack — gun-barrel")
+        _save_planview(parcel, window, wells, os.path.join(d, f"planview_{tag}.png"), f"{label} wine-rack ({well_type})")
+        _save_gunbarrel(wells, os.path.join(d, f"gunbarrel_{tag}.png"), f"{label} wine-rack — gun-barrel")
+        if geojson:
+            _save_geojson(parcel, window, wells, os.path.join(d, f"scenario_{tag}.geojson"))
         if save:
             _save_scenario(parcel, base, wells, asdict(rep), label)
         return
@@ -229,7 +202,11 @@ def main() -> None:
     tag = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") + f"_{well_type}"
     if azimuth is not None:
         tag += f"_az{int(azimuth)}"
-    _plot(parcel, window, wells, os.path.join(os.path.dirname(__file__), f"planview_{tag}.png"), title)
+    d = os.path.dirname(__file__)
+    _save_planview(parcel, window, wells, os.path.join(d, f"planview_{tag}.png"), title)
+    _save_gunbarrel(wells, os.path.join(d, f"gunbarrel_{tag}.png"), f"{title} — gun-barrel")
+    if geojson:
+        _save_geojson(parcel, window, wells, os.path.join(d, f"scenario_{tag}.geojson"))
     if save:
         _save_scenario(parcel, p, wells, asdict(feas), label)
 
