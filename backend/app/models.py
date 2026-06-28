@@ -75,6 +75,29 @@ class ParcelsResponse(BaseModel):
     parcels: list[ParcelInfo]
 
 
+class InventoryRequest(BaseModel):
+    parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
+    buffer_ft: float = 330.0                    # tight: this unit's inventory
+    categories: list[str] = ["pdp", "pud", "res"]
+
+
+class BenchInfoModel(BaseModel):
+    formation: str
+    median_tvd_ft: float | None
+    n_pdp: int
+    n_pud: int
+    n_res: int
+    suggested_spacing_ft: float | None
+    note: str
+
+
+class InventoryResponse(BaseModel):
+    well_count: int
+    geojson: dict[str, Any]                     # parcel + existing PDP/PUD/RES legs
+    gunbarrel: dict[str, Any]
+    benches: list[BenchInfoModel]
+
+
 class SaveScenarioRequest(BaseModel):
     deal_id: str
     scenario_id: str

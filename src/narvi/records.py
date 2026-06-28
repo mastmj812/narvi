@@ -84,6 +84,12 @@ class InventoryWell:
     drilled_lateral_ft: float    # legs + turn arc (D&C cost)
     nearest_neighbor_spacing_ft: float
     setback_ft: float
+    # provenance: Novi pass-through ('pdp' existing / 'pud' / 'res') vs the
+    # generator ('generated'). Lets one record carry both the curate baseline
+    # (adopt Novi's locations) and the override/redesign path.
+    category: str = "generated"
+    novi_wellname: str | None = None   # set for pud/res pass-through
+    edited: bool = False               # user-moved (capstone: gun-barrel drag)
 
 
 @dataclass

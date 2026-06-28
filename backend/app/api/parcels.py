@@ -3,17 +3,54 @@ WGS84 GeoJSON for the map + a label to pick from."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+import psycopg
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from shapely.geometry import mapping
 
-from narvi import load_named_parcels, synthetic_section
+from narvi import (
+    gunbarrel_data,
+    load_named_parcels,
+    parcel_from_geojson,
+    scenario_geojson,
+    synthetic_section,
+)
 from narvi.viz import _to_wgs_geom
+from narvi.warehouse import available_benches, inventory_from_warehouse
 
-from ..models import ParcelInfo, ParcelsResponse
+from ..deps import get_conn
+from ..models import (
+    BenchInfoModel,
+    InventoryRequest,
+    InventoryResponse,
+    ParcelInfo,
+    ParcelsResponse,
+)
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
 
 _ACRE_M2 = 4046.8564224
+
+
+@router.post("/inventory", response_model=InventoryResponse)
+def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn)) -> InventoryResponse:
+    """Existing inventory in/around a parcel — PDP producers + Novi PUD/RES sticks
+    as InventoryWells (the curate baseline) + the bench menu. Drives the initial
+    map + gun-barrel before any curation."""
+    parcel = parcel_from_geojson(req.parcel)
+    wells = inventory_from_warehouse(conn, parcel, req.buffer_ft, tuple(req.categories))
+    benches = available_benches(conn, parcel, buffer_ft=req.buffer_ft)
+    return InventoryResponse(
+        well_count=len(wells),
+        geojson=scenario_geojson(parcel, None, wells),
+        gunbarrel=gunbarrel_data(wells),
+        benches=[
+            BenchInfoModel(
+                formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
+                n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
+                note=b.note)
+            for b in benches
+        ],
+    )
 
 
 @router.get("/synthetic", response_model=ParcelInfo)

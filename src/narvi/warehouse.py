@@ -36,7 +36,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
 
 from .parcel import WORK_EPSG
-from .records import FT_PER_M, Zone
+from .records import FT_PER_M, InventoryWell, Leg, Zone
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 
@@ -75,6 +75,10 @@ _SESSION_SETTINGS: tuple[str, ...] = (
 # parcel work CRS (UTM 13N, metres) -> WGS84 lon/lat for the spatial filter
 _to_wgs = Transformer.from_crs(
     CRS.from_epsg(WORK_EPSG), CRS.from_epsg(4326), always_xy=True
+).transform
+# WGS84 lon/lat -> work CRS, for building leg geometry from warehouse points
+_to_work = Transformer.from_crs(
+    CRS.from_epsg(4326), CRS.from_epsg(WORK_EPSG), always_xy=True
 ).transform
 
 
@@ -509,3 +513,97 @@ def available_benches(
                   f"({', '.join(srcs) or 'no control'}{sp})"
                   if b.median_tvd_ft is not None else f"{b.formation} ({', '.join(srcs)})")
     return out
+
+
+_PDP_SQL = """
+    SELECT formation_blueox, tvd_ft, lateral_length_ft, api10,
+           landing_point_lon, landing_point_lat, bhl_lon, bhl_lat
+    FROM curated.wells_enriched
+    WHERE is_horizontal AND formation_blueox IS NOT NULL
+      AND landing_point_lon IS NOT NULL AND landing_point_lat IS NOT NULL
+      AND bhl_lon IS NOT NULL AND bhl_lat IS NOT NULL
+      AND wellstick_geom IS NOT NULL
+      AND ST_DWithin(wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+"""
+
+_STICK_SQL = """
+    SELECT ifb.formation_blueox, il.tvd, il.unique_id, lower(il.category),
+           ST_X(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
+           ST_Y(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
+           ST_X(ST_EndPoint(ST_LineMerge(il.wellstick_geom))),
+           ST_Y(ST_EndPoint(ST_LineMerge(il.wellstick_geom)))
+    FROM curated.intel_locations il
+    JOIN curated.intel_formation_blueox ifb USING (stick_id)
+    WHERE il.category = ANY(%(cats)s) AND il.wellstick_geom IS NOT NULL
+      AND ifb.formation_blueox IS NOT NULL
+      AND ST_DWithin(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+"""
+
+
+def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az, n):
+    """Build a single-leg InventoryWell from a warehouse lateral (heel->toe in
+    lon/lat). Returns (well, cross_m) where cross_m is the well's work-CRS centroid
+    for the cross-section projection; gunbarrel_x is set by the caller once the
+    set's mean is known."""
+    hx, hy = _to_work(h_lon, h_lat)
+    tx, ty = _to_work(t_lon, t_lat)
+    length_ft = math.hypot(tx - hx, ty - hy) * FT_PER_M
+    leg = Leg(
+        heel_xy=(round(hx, 2), round(hy, 2)), toe_xy=(round(tx, 2), round(ty, 2)),
+        heel_lonlat=(round(h_lon, 6), round(h_lat, 6)),
+        toe_lonlat=(round(t_lon, 6), round(t_lat, 6)),
+        length_ft=round(length_ft, 1), gunbarrel_x_ft=0.0,   # set by caller
+    )
+    well = InventoryWell(
+        scenario_id="", deal_id="", well_name=str(name or f"{category}-{n}"),
+        well_type="single", formation=fb,
+        target_tvd_ft=float(tvd) if tvd else 0.0, lateral_azimuth_deg=round(az, 1),
+        legs=[leg], turn=None,
+        completed_lateral_ft=round(length_ft, 1), drilled_lateral_ft=round(length_ft, 1),
+        nearest_neighbor_spacing_ft=0.0, setback_ft=0.0,
+        category=category, novi_wellname=novi,
+    )
+    return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
+
+
+def inventory_from_warehouse(
+    conn: psycopg.Connection,
+    parcel: BaseGeometry,
+    buffer_ft: float = 1320.0,
+    categories: tuple[str, ...] = ("pdp", "pud", "res"),
+) -> list[InventoryWell]:
+    """Adopt the EXISTING inventory in/around a parcel as InventoryWells — the
+    curate-mode baseline. PDP producers (curated.wells_enriched, landing->bottom-
+    hole leg) and Novi PUD/RES sticks (curated.intel_locations + intel_formation_
+    blueox) become single-leg wells tagged by `category`, so the same viz renders
+    all three and the user curates by bench/category. gunbarrel_x is the cross-
+    section offset (perpendicular to the grid azimuth), centered on the set."""
+    aoi = parcel_to_ewkt_4326(parcel)
+    buf_m = buffer_ft / FT_PER_M
+    az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
+          .azimuth_deg or 0.0)
+    perp = (math.cos(math.radians(az)), -math.sin(math.radians(az)))
+    items: list[tuple[InventoryWell, tuple[float, float]]] = []
+
+    with conn.cursor() as cur:
+        if "pdp" in categories:
+            cur.execute(_PDP_SQL, {"aoi": aoi, "buf": buf_m})
+            for fb, tvd, _ll, api10, hlon, hlat, tlon, tlat in cur.fetchall():
+                if None not in (hlon, hlat, tlon, tlat):
+                    items.append(_passthrough_well(fb, tvd, api10, None, "pdp",
+                                                   hlon, hlat, tlon, tlat, az, len(items) + 1))
+        stick_cats = [c.upper() for c in categories if c in ("pud", "res")]
+        if stick_cats:
+            cur.execute(_STICK_SQL, {"aoi": aoi, "buf": buf_m, "cats": stick_cats})
+            for fb, tvd, uid, cat, hlon, hlat, tlon, tlat in cur.fetchall():
+                if None not in (hlon, hlat, tlon, tlat):
+                    items.append(_passthrough_well(fb, tvd, uid, uid, cat,
+                                                   hlon, hlat, tlon, tlat, az, len(items) + 1))
+
+    if not items:
+        return []
+    # center the cross-section so the gun-barrel spreads around 0
+    mean_cross = sum(cx * perp[0] + cy * perp[1] for _, (cx, cy) in items) / len(items)
+    for well, (cx, cy) in items:
+        well.legs[0].gunbarrel_x_ft = round((cx * perp[0] + cy * perp[1] - mean_cross) * FT_PER_M, 1)
+    return [w for w, _ in items]
