@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api import generate, health, parcels, scenarios, warehouse
+from app.api import basemap, generate, health, parcels, scenarios, warehouse
 
 app = FastAPI(title="narvi API", version=__version__)
 
@@ -26,6 +26,7 @@ app.add_middleware(
 )
 
 app.include_router(health.router, prefix="/api")
+app.include_router(basemap.router, prefix="/api")
 app.include_router(parcels.router, prefix="/api")
 app.include_router(generate.router, prefix="/api")
 app.include_router(warehouse.router, prefix="/api")
