@@ -383,3 +383,129 @@ def section_azimuth(
     (so the caller falls back to the geometry core's parcel-long-axis default)."""
     st = lateral_azimuth_stats(conn, parcel, buffer_ft)
     return st.azimuth_deg if st.confident else None
+
+
+@dataclass
+class BenchInfo:
+    """A developable bench discovered in/around a parcel, with evidence."""
+
+    formation: str                  # formation_blueox code
+    median_tvd_ft: float | None
+    n_pdp: int                      # producing wells (proven; -> anduin TC route)
+    n_pud: int                      # Novi PUD sticks
+    n_res: int                      # Novi RES sticks (resource/edge of fairway)
+    suggested_spacing_ft: float | None   # de-facto same-bench lateral spacing
+    note: str = ""
+
+
+def available_benches(
+    conn: psycopg.Connection,
+    parcel: BaseGeometry,
+    buffer_ft: float = 1320.0,
+) -> list[BenchInfo]:
+    """Benches present in/around a parcel — the same evidence erebor shows for a
+    unit: Novi intel PUD/RES sticks (via curated.intel_formation_blueox) plus PDP
+    producers (curated.wells_enriched), keyed on formation_blueox. Each bench
+    carries its median landing TVD and a suggested per-bench spacing derived from
+    the de-facto nearest-neighbor distance between same-bench laterals (Bone Spring
+    develops wider than Wolfcamp), so the wine-rack defaults match how the rock is
+    actually developed. Buffer (default 1320 ft = ~1 spacing) catches immediate
+    offsets just outside the unit."""
+    aoi = parcel_to_ewkt_4326(parcel)
+    buf_m = buffer_ft / FT_PER_M
+    benches: dict[str, BenchInfo] = {}
+
+    with conn.cursor() as cur:
+        # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox
+        cur.execute(
+            """
+            SELECT ifb.formation_blueox AS fb, il.category, COUNT(*) AS n,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY il.tvd) AS med_tvd
+            FROM curated.intel_locations il
+            JOIN curated.intel_formation_blueox ifb USING (stick_id)
+            WHERE il.wellstick_geom IS NOT NULL
+              AND ifb.formation_blueox IS NOT NULL
+              AND ST_DWithin(il.wellstick_geom::geography,
+                             ST_GeogFromText(%(aoi)s), %(buf)s)
+            GROUP BY 1, 2
+            """,
+            {"aoi": aoi, "buf": buf_m},
+        )
+        for fb, category, n, med_tvd in cur.fetchall():
+            b = benches.setdefault(fb, BenchInfo(fb, med_tvd, 0, 0, 0, None))
+            if med_tvd is not None and b.median_tvd_ft is None:
+                b.median_tvd_ft = med_tvd
+            if category == "PUD":
+                b.n_pud += n
+            elif category == "RES":
+                b.n_res += n
+            elif category == "PDP":
+                b.n_pdp += n
+
+        # PDP producers (authoritative for proven benches + their median TVD)
+        cur.execute(
+            """
+            SELECT formation_blueox AS fb, COUNT(*) AS n,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY tvd_ft) AS med_tvd
+            FROM curated.wells_enriched
+            WHERE is_horizontal AND formation_blueox IS NOT NULL
+              AND tvd_ft IS NOT NULL AND wellstick_geom IS NOT NULL
+              AND ST_DWithin(wellstick_geom::geography,
+                             ST_GeogFromText(%(aoi)s), %(buf)s)
+            GROUP BY 1
+            """,
+            {"aoi": aoi, "buf": buf_m},
+        )
+        for fb, n, med_tvd in cur.fetchall():
+            b = benches.setdefault(fb, BenchInfo(fb, med_tvd, 0, 0, 0, None))
+            b.n_pdp = max(b.n_pdp, n)                  # producers, not intel-PDP sticks
+            if med_tvd is not None:
+                b.median_tvd_ft = med_tvd              # producer TVD supersedes
+
+        # de-facto per-bench spacing: project same-bench stick centroids onto the
+        # cross-section axis (perpendicular to the grid azimuth) and take the
+        # median gap between distinct rows. Robust to near-duplicate/stacked
+        # sticks (same lateral as PUD+RES, report versions), which a raw nearest-
+        # neighbor distance double-counts as ~0 ft.
+        az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
+              .azimuth_deg or 0.0)
+        perp = (math.cos(math.radians(az)), -math.sin(math.radians(az)))   # cross axis (E, N)
+        cur.execute(
+            f"""
+            SELECT ifb.formation_blueox AS fb,
+                   ST_X(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS x,
+                   ST_Y(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS y
+            FROM curated.intel_locations il
+            JOIN curated.intel_formation_blueox ifb USING (stick_id)
+            WHERE ifb.formation_blueox IS NOT NULL AND il.wellstick_geom IS NOT NULL
+              AND ST_DWithin(il.wellstick_geom::geography,
+                             ST_GeogFromText(%(aoi)s), %(buf)s)
+            """,
+            {"aoi": aoi, "buf": buf_m},
+        )
+        cross: dict[str, list[float]] = {}
+        for fb, x, y in cur.fetchall():
+            if fb in benches and x is not None and y is not None:
+                cross.setdefault(fb, []).append((x * perp[0] + y * perp[1]) * FT_PER_M)
+
+    for fb, vals in cross.items():
+        rows = sorted({round(v / 50.0) * 50.0 for v in vals})       # dedup rows to ~50 ft
+        gaps = [b - a for a, b in zip(rows, rows[1:]) if (b - a) >= 200.0]  # skip duplicates
+        if gaps:
+            benches[fb].suggested_spacing_ft = round(_median(gaps), 0)
+
+    out = sorted(benches.values(),
+                 key=lambda b: (b.median_tvd_ft if b.median_tvd_ft is not None else 1e9))
+    for b in out:
+        srcs = []
+        if b.n_pdp:
+            srcs.append(f"{b.n_pdp} PDP")
+        if b.n_pud:
+            srcs.append(f"{b.n_pud} PUD")
+        if b.n_res:
+            srcs.append(f"{b.n_res} RES")
+        sp = f", ~{b.suggested_spacing_ft:.0f} ft spacing" if b.suggested_spacing_ft else ""
+        b.note = (f"{b.formation} @ {b.median_tvd_ft:,.0f} ft TVD "
+                  f"({', '.join(srcs) or 'no control'}{sp})"
+                  if b.median_tvd_ft is not None else f"{b.formation} ({', '.join(srcs)})")
+    return out
