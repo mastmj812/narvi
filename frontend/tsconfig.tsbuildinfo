@@ -1,1 +1,0 @@
-{"root":["./src/app.tsx","./src/mapview.tsx","./src/main.tsx","./src/store.ts","./src/api/client.ts","./src/map/scenariolayers.ts","./src/panels/gunbarrel.tsx","./src/panels/paramspanel.tsx","./src/panels/scenariobar.tsx"],"version":"5.9.3"}
