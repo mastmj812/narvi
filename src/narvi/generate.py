@@ -73,19 +73,34 @@ def _single_well(leg: Leg, p: ScenarioParams, n: int) -> InventoryWell:
     )
 
 
-def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n) -> InventoryWell | None:
+def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n,
+                turn_at_high: bool = True) -> InventoryWell | None:
+    """Pair two adjacent rows into a U-turn. The semicircular turn sits at ONE end:
+    turn_at_high -> the high-x (toe) end, both legs trimmed to the shorter row's far
+    boundary (symmetric-ish); turn_at_high=False -> the low-x (heel) end, each leg
+    then runs to its OWN far boundary (asymmetric — captures an irregular far edge,
+    e.g. a notched unit, that the symmetric turn would waste). Caller tries both and
+    keeps the one that drills more."""
     ya, x0a, x1a = la
     yb, x0b, x1b = lb
     r_m = spacing_m / 2.0
-    common_toe = min(x1a, x1b) - r_m
-    if common_toe <= x0a or common_toe <= x0b:
-        return None  # legs too short to host the turn -> caller falls back to singles
+    if turn_at_high:
+        common = min(x1a, x1b) - r_m              # turn at the toe (high-x) end
+        if common <= x0a or common <= x0b:
+            return None
+        legA = _make_leg(ya, x0a, common, centroid, phi, y_mid)
+        legB = _make_leg(yb, x0b, common, centroid, phi, y_mid)
+        arc_sign = 1.0                            # bulge past the toes (+x)
+    else:
+        common = max(x0a, x0b) + r_m              # turn at the heel (low-x) end
+        if common >= x1a or common >= x1b:
+            return None
+        legA = _make_leg(ya, common, x1a, centroid, phi, y_mid)
+        legB = _make_leg(yb, common, x1b, centroid, phi, y_mid)
+        arc_sign = -1.0                           # bulge past the heels (-x)
 
-    legA = _make_leg(ya, x0a, common_toe, centroid, phi, y_mid)
-    legB = _make_leg(yb, x0b, common_toe, centroid, phi, y_mid)
-
-    cx, cy = common_toe, (ya + yb) / 2.0
-    arc = [(cx + r_m * math.cos(t), cy + r_m * math.sin(t))
+    cx, cy = common, (ya + yb) / 2.0
+    arc = [(cx + arc_sign * r_m * math.cos(t), cy + r_m * math.sin(t))
            for t in (-math.pi / 2 + i * math.pi / _ARC_STEPS for i in range(_ARC_STEPS + 1))]
     arc_work = [unrotate(x, y, centroid, phi) for x, y in arc]
     radius_ft = r_m * FT_PER_M
@@ -107,6 +122,24 @@ def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n) -> InventoryWell 
         drilled_lateral_ft=round(completed + arc_ft, 1),
         nearest_neighbor_spacing_ft=p.spacing_ft, setback_ft=p.setback_ft,
     )
+
+
+def _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, turn_at_high) -> list[InventoryWell]:
+    """Pair adjacent rows into U-turns at the given turn end; an unpaired/too-short
+    leftover falls back to a single."""
+    wells: list[InventoryWell] = []
+    i = 0
+    while i < len(legs):
+        if i + 1 < len(legs):
+            w = _uturn_well(legs[i], legs[i + 1], spacing_m, centroid, phi, y_mid,
+                            p, len(wells) + 1, turn_at_high)
+            if w is not None:
+                wells.append(w)
+                i += 2
+                continue
+        wells.append(_single_well(_make_leg(*legs[i], centroid, phi, y_mid), p, len(wells) + 1))
+        i += 1
+    return wells
 
 
 def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float) -> int:
@@ -162,8 +195,6 @@ def generate_scenario(
     # own stagger, so it passes optimize_phase=False).
     if optimize_phase and p.objective == "max_count" and row_offset_ft == 0.0:
         row_offset_ft = _best_offset(window, az, p)
-    legs, centroid, phi, y_mid = laterals_rotated(
-        window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft)
     spacing_m = p.spacing_ft / FT_PER_M
 
     # U-turn leg-to-leg = the leg spacing here; a turn tighter than the floor is
@@ -171,29 +202,29 @@ def generate_scenario(
     uturn = p.well_type == "uturn" and p.spacing_ft >= p.uturn_min_leg_to_leg_ft
     floored = p.well_type == "uturn" and not uturn
 
-    wells: list[InventoryWell] = []
     if uturn:
-        i = 0
-        while i < len(legs):
-            if i + 1 < len(legs):
-                w = _uturn_well(legs[i], legs[i + 1], spacing_m, centroid, phi, y_mid,
-                                p, len(wells) + 1)
-                if w is not None:
-                    wells.append(w)
-                    i += 2
-                    continue
-            wells.append(_single_well(_make_leg(*legs[i], centroid, phi, y_mid),
-                                      p, len(wells) + 1))
-            i += 1
+        # Keep short rows (floor = one spacing, enough to host the turn) so a stub
+        # can serve as the SHORT leg of an asymmetric U-turn into an irregular
+        # extension (a notched unit's corner); min_lateral is enforced on the well's
+        # COMPLETED length, not per row. Try the turn at each end, keep the better.
+        u_legs, centroid, phi, y_mid = laterals_rotated(
+            window, az, p.spacing_ft, p.spacing_ft, row_offset_ft)
+        hi = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, True)
+        lo = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, False)
+        placed = max((hi, lo), key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
+        wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
+        for k, w in enumerate(wells, 1):
+            w.well_name = f"{p.formation}-{k:02d}"
+        dropped = len(placed) - len(wells)
     else:
-        for leg in legs:
-            wells.append(_single_well(_make_leg(*leg, centroid, phi, y_mid),
-                                      p, len(wells) + 1))
+        legs, centroid, phi, y_mid = laterals_rotated(
+            window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft)
+        wells = [_single_well(_make_leg(*leg, centroid, phi, y_mid), p, k + 1)
+                 for k, leg in enumerate(legs)]
+        dropped = _dropped_short(window, az, p, row_offset_ft)
 
     for w in wells:
         w.lateral_azimuth_deg = round(az, 1)
-
-    dropped = _dropped_short(window, az, p, row_offset_ft)
     n_legs = sum(len(w.legs) for w in wells)
     feas = Feasibility(
         requested=None, placed=len(wells), legs=n_legs,
@@ -204,8 +235,8 @@ def generate_scenario(
               f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
               + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
                  f"floor -> singles]" if floored else "")
-              + (f"  [{dropped} edge lateral{'s' if dropped != 1 else ''} < {p.min_lateral_ft:.0f} ft "
-                 f"min dropped -> fewer toward the parcel edges]" if dropped else "")),
+              + (f"  [{dropped} short {'well' if uturn else 'lateral'}{'s' if dropped != 1 else ''} "
+                 f"< {p.min_lateral_ft:.0f} ft dropped]" if dropped else "")),
     )
     return wells, window, feas
 
