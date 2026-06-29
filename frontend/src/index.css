@@ -91,6 +91,12 @@ button.ghost {
   padding: 4px 8px; font-size: 10px; color: #52525b; border-top: 1px solid #eee;
 }
 .gb-foot span { display: inline-flex; align-items: center; gap: 3px; }
+.gb-tip {
+  position: fixed; z-index: 20; pointer-events: none;
+  background: rgba(17,24,39,.96); color: #f9fafb; padding: 6px 9px;
+  border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.3); max-width: 240px;
+}
+.gb-tip td { padding: 0; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; margin-top: 4px; }
 .legend span { display: inline-flex; align-items: center; gap: 4px; }
 .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }

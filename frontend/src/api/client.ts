@@ -30,7 +30,7 @@ export interface GunbarrelData {
   formations: { formation: string; color: string }[];
   points: {
     well_name: string; formation: string; color: string; well_type: string;
-    category: string; novi_wellname: string | null;
+    category: string; novi_wellname: string | null; recon_status: string | null;
     offset_ft: number; tvd_ft: number;
   }[];
   links: {

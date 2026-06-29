@@ -5,36 +5,62 @@ import { catActive, useStore } from "../store";
 
 const M = { l: 46, r: 12, t: 10, b: 22 };
 
-// Marker convention mirrors erebor: PDP = solid circle, PUD = hollow (white) circle,
-// RES = hollow triangle. Color = formation_blueox.
-function Marker({ cat, cx, cy, color }: { cat: string; cx: number; cy: number; color: string }) {
+type Pt = GunbarrelData["points"][number];
+
+// PDP = solid circle, PUD = hollow (white) circle, RES = hollow triangle; color =
+// formation_blueox (erebor convention). `generated` (override) renders solid.
+function Marker({ p, cx, cy, color, on }: {
+  p: Pt; cx: number; cy: number; color: string;
+  on: (p: Pt | null, e?: React.MouseEvent) => void;
+}) {
   const r = 4;
-  const hollow = cat === "pud" || cat === "res";
+  const hollow = p.category === "pud" || p.category === "res";
   const paint = {
     fill: hollow ? "#ffffff" : color,
     stroke: hollow ? color : "#3f3f46",
     strokeWidth: hollow ? 1.5 : 0.7,
-    opacity: cat === "res" ? 0.85 : 1,
+    opacity: p.category === "res" ? 0.85 : 1,
   };
-  if (cat === "res")
-    return <polygon points={`${cx},${cy - r} ${cx - r},${cy + r} ${cx + r},${cy + r}`} {...paint} />;
-  return <circle cx={cx} cy={cy} r={r} {...paint} />;
+  const h = {
+    onMouseEnter: (e: React.MouseEvent) => on(p, e),
+    onMouseMove: (e: React.MouseEvent) => on(p, e),
+    onMouseLeave: () => on(null),
+  };
+  const shape = p.category === "res"
+    ? <polygon points={`${cx},${cy - r} ${cx - r},${cy + r} ${cx + r},${cy + r}`} {...paint} {...h} />
+    : <circle cx={cx} cy={cy} r={r} {...paint} {...h} />;
+  return (
+    <g>
+      <circle cx={cx} cy={cy} r={r + 4} fill="transparent" {...h} />
+      {shape}
+    </g>
+  );
 }
 
-function useElementSize() {
-  const [size, setSize] = useState({ width: 400, height: 220 });
-  const roRef = useRef<ResizeObserver | null>(null);
-  const ref = useCallback((node: HTMLDivElement | null) => {
-    roRef.current?.disconnect();
-    if (!node) return;
-    const ro = new ResizeObserver((e) => {
-      const cr = e[0].contentRect;
-      setSize({ width: cr.width, height: cr.height });
-    });
-    ro.observe(node);
-    roRef.current = ro;
-  }, []);
-  return [ref, size] as const;
+function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
+  const flipX = x > window.innerWidth - 230;
+  const flipY = y > window.innerHeight - 160;
+  const style: React.CSSProperties = {
+    ...(flipX ? { right: window.innerWidth - x + 14 } : { left: x + 14 }),
+    ...(flipY ? { bottom: window.innerHeight - y + 14 } : { top: y + 14 }),
+  };
+  const row = (k: string, v: string) => (
+    <tr><td style={{ color: "#9ca3af", paddingRight: 8 }}>{k}</td><td>{v}</td></tr>
+  );
+  return (
+    <div className="gb-tip" style={style}>
+      <div style={{ fontWeight: 600, marginBottom: 3 }}>{p.novi_wellname ?? p.well_name}</div>
+      <table style={{ fontSize: 11, borderCollapse: "collapse" }}>
+        <tbody>
+          {row("Category", p.category.toUpperCase())}
+          {row("Bench", p.formation)}
+          {p.recon_status ? row("Status", p.recon_status.replace(/_/g, " ")) : null}
+          {row("TVD", `${Math.round(p.tvd_ft).toLocaleString()} ft`)}
+          {row("Offset", `${Math.round(p.offset_ft).toLocaleString()} ft`)}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 export function GunBarrel() {
@@ -44,15 +70,18 @@ export function GunBarrel() {
   const keptBenches = useStore((s) => s.keptBenches);
   const cats = useStore((s) => s.cats);
 
+  // Points/links come from the active source (filtered in curate); the legend is
+  // ALWAYS rebuilt from the shared formation_blueox palette so swatches match the
+  // markers (the backend's per-scenario palette is ignored here).
   const gb = useMemo<GunbarrelData | null>(() => {
     const raw = appMode === "override" ? result?.gunbarrel : inventory?.gunbarrel;
     if (!raw) return null;
-    if (appMode === "override") return raw;
-    const keptSet = new Set(keptBenches);
-    const keep = (formation: string, category: string) =>
-      keptSet.has(formation) && catActive(cats, category);
-    const points = raw.points.filter((p) => keep(p.formation, p.category));
-    const links = raw.links.filter((l) => keptSet.has(l.formation));
+    let points = raw.points, links = raw.links;
+    if (appMode !== "override") {
+      const kept = new Set(keptBenches);
+      points = raw.points.filter((p) => kept.has(p.formation) && catActive(cats, p.category));
+      links = raw.links.filter((l) => kept.has(l.formation));
+    }
     const forms = [...new Set(points.map((p) => p.formation))]
       .sort((a, b) =>
         points.find((p) => p.formation === a)!.tvd_ft - points.find((p) => p.formation === b)!.tvd_ft)
@@ -66,6 +95,9 @@ export function GunBarrel() {
   const [dragging, setDragging] = useState(false);
   const off = useRef({ dx: 0, dy: 0 });
   const [bodyRef, size] = useElementSize();
+  const [hover, setHover] = useState<{ p: Pt; x: number; y: number } | null>(null);
+  const onHover = useCallback((p: Pt | null, e?: React.MouseEvent) =>
+    setHover(p && e ? { p, x: e.clientX, y: e.clientY } : null), []);
 
   useEffect(() => {
     if (!dragging) return;
@@ -110,8 +142,8 @@ export function GunBarrel() {
               stroke={colorForBlueox(l.formation)} strokeWidth={1} opacity={0.5} />
           ))}
           {gb.points.map((p, i) => (
-            <Marker key={`p${i}`} cat={p.category} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
-              color={colorForBlueox(p.formation)} />
+            <Marker key={`p${i}`} p={p} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
+              color={colorForBlueox(p.formation)} on={onHover} />
           ))}
           <text x={M.l - 5} y={M.t + 6} textAnchor="end" fontSize={9} fill="#71717a">{minY.toFixed(0)}</text>
           <text x={M.l - 5} y={H - M.b} textAnchor="end" fontSize={9} fill="#71717a">{maxY.toFixed(0)}</text>
@@ -124,6 +156,23 @@ export function GunBarrel() {
           <span key={f.formation}><i className="swatch" style={{ background: f.color }} />{f.formation}</span>
         ))}
       </div>
+      {hover && <Tooltip p={hover.p} x={hover.x} y={hover.y} />}
     </div>
   );
+}
+
+function useElementSize() {
+  const [size, setSize] = useState({ width: 400, height: 220 });
+  const roRef = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((node: HTMLDivElement | null) => {
+    roRef.current?.disconnect();
+    if (!node) return;
+    const ro = new ResizeObserver((e) => {
+      const cr = e[0].contentRect;
+      setSize({ width: cr.width, height: cr.height });
+    });
+    ro.observe(node);
+    roRef.current = ro;
+  }, []);
+  return [ref, size] as const;
 }

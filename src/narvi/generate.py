@@ -142,6 +142,19 @@ def _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, turn_at_high) -> lis
     return wells
 
 
+def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams) -> bool:
+    """Pick ONE turn end for the whole deal (all wells drilled from one surface
+    side): place U-turns both ways on the window and return turn_at_high for the
+    orientation that drills more total completed footage."""
+    legs, centroid, phi, y_mid = laterals_rotated(window, az, p.spacing_ft, p.spacing_ft, 0.0)
+    spacing_m = p.spacing_ft / FT_PER_M
+    hi = sum(w.completed_lateral_ft
+             for w in _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, True))
+    lo = sum(w.completed_lateral_ft
+             for w in _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, False))
+    return hi >= lo
+
+
 def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float) -> int:
     return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset)[0])
 
@@ -206,12 +219,16 @@ def generate_scenario(
         # Keep short rows (floor = one spacing, enough to host the turn) so a stub
         # can serve as the SHORT leg of an asymmetric U-turn into an irregular
         # extension (a notched unit's corner); min_lateral is enforced on the well's
-        # COMPLETED length, not per row. Try the turn at each end, keep the better.
+        # COMPLETED length, not per row. Turn end: p.turn_at_high if fixed (the
+        # wine-rack sets it once for the whole deal), else auto -> keep the better.
         u_legs, centroid, phi, y_mid = laterals_rotated(
             window, az, p.spacing_ft, p.spacing_ft, row_offset_ft)
-        hi = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, True)
-        lo = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, False)
-        placed = max((hi, lo), key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
+        if p.turn_at_high is None:
+            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, e)
+                     for e in (True, False)]
+            placed = max(cands, key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
+        else:
+            placed = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, p.turn_at_high)
         wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
         for k, w in enumerate(wells, 1):
             w.well_name = f"{p.formation}-{k:02d}"
@@ -264,7 +281,13 @@ def generate_wine_rack(
     # resolve azimuth once so every bench shares it (and any max_count sweep runs once)
     ns = base.setback_ns_ft if base.setback_ns_ft is not None else base.setback_ft
     ew = base.setback_ew_ft if base.setback_ew_ft is not None else base.setback_ft
-    az = _resolve_azimuth(parcel, drillable_window(parcel, ns, ew), base)
+    window0 = drillable_window(parcel, ns, ew)
+    az = _resolve_azimuth(parcel, window0, base)
+    # Fix ONE turn end for the whole deal so zones don't mix north/south turns
+    # (every well drills from one surface side); auto-pick the higher-footage side.
+    u = base.well_type == "uturn" and base.spacing_ft >= base.uturn_min_leg_to_leg_ft
+    if u and base.turn_at_high is None:
+        base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base))
     zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
 
     all_wells: list[InventoryWell] = []
