@@ -81,6 +81,16 @@ export function ParamsPanel() {
             <option value="max_count">max count</option>
           </select>
         </div>
+        {params.well_type === "uturn" && (
+          <div className="field">
+            <label title="which side the pads/heels go; the U-turn sits at the opposite end">drill from</label>
+            <select value={params.drill_from} onChange={(e) => setParam("drill_from", e.target.value as Params["drill_from"])}>
+              <option value="auto">auto (max footage)</option>
+              <option value="north">north</option>
+              <option value="south">south</option>
+            </select>
+          </div>
+        )}
         <div className="field">
           <label>grid azimuth (auto)</label>
           <input type="checkbox" checked={sourceAzimuth} onChange={(e) => setSourceAzimuth(e.target.checked)} />

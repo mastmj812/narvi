@@ -38,10 +38,13 @@ class ScenarioParams:
     # tight to drill. 990 ft is a conservative hard floor — Novi's 214 real U-turns
     # run ~1,400-1,600 ft typical (median 1,589); ~1,500 is a realistic default.
     uturn_min_leg_to_leg_ft: float = 990.0
-    # U-turn turn end, fixed for the whole DEAL (one surface side): None = auto
-    # (pick the end that drills more footage, then apply to every zone), True =
-    # turn at the high-x/toe end, False = turn at the low-x/heel end. Operationally
-    # all wells drill from one side, so a wine-rack must not mix north/south turns.
+    # U-turn surface side for the whole DEAL: 'auto' (pick the side that drills more
+    # footage), or 'north' / 'south' (force the heels/pad on that side; the turn
+    # goes at the opposite, deep end). Resolved to turn_at_high using the azimuth.
+    drill_from: str = "auto"           # 'auto' | 'north' | 'south'
+    # internal turn end (None = auto/from drill_from): True = turn at the high-x
+    # (toe) end, False = turn at the low-x (heel) end. The wine-rack fixes ONE value
+    # for the deal so zones never mix north/south turns.
     turn_at_high: bool | None = None
     # asymmetric per-boundary setbacks (override the uniform setback_ft). Geographic
     # N/S vs E/W: edges facing N/S use setback_ns_ft, edges facing E/W use setback_ew_ft.

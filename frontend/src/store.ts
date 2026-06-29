@@ -17,7 +17,8 @@ export type AppMode = "curate" | "override";
 
 const DEFAULT_PARAMS: Params = {
   spacing_ft: 880, setback_ft: 200, formation: "WCA_1", target_tvd_ft: 11000,
-  well_type: "single", objective: "max_lateral", azimuth_deg: null, min_lateral_ft: 4000,
+  well_type: "single", objective: "max_lateral", drill_from: "auto",
+  azimuth_deg: null, min_lateral_ft: 4000,
 };
 
 function dealIdFor(label: string): string {

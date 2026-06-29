@@ -142,6 +142,15 @@ def _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, turn_at_high) -> lis
     return wells
 
 
+def _drill_to_high(drill_from: str, az: float) -> bool:
+    """Map a 'north'/'south' surface side to turn_at_high, given the azimuth: the
+    turn goes at the end OPPOSITE the heels/pad. Whether the high-x end points north
+    or south depends on the bearing's N-S component (cos az)."""
+    north_is_high = (az % 180.0) < 90.0          # +x has a northward component
+    # heels (pad) on the chosen side -> turn at the other end
+    return north_is_high if drill_from == "south" else (not north_is_high)
+
+
 def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams) -> bool:
     """Pick ONE turn end for the whole deal (all wells drilled from one surface
     side): place U-turns both ways on the window and return turn_at_high for the
@@ -223,12 +232,15 @@ def generate_scenario(
         # wine-rack sets it once for the whole deal), else auto -> keep the better.
         u_legs, centroid, phi, y_mid = laterals_rotated(
             window, az, p.spacing_ft, p.spacing_ft, row_offset_ft)
-        if p.turn_at_high is None:
+        turn = p.turn_at_high                       # explicit (wine-rack sets it) wins
+        if turn is None and p.drill_from in ("north", "south"):
+            turn = _drill_to_high(p.drill_from, az)
+        if turn is None:
             cands = [_place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, e)
                      for e in (True, False)]
             placed = max(cands, key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
         else:
-            placed = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, p.turn_at_high)
+            placed = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, turn)
         wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
         for k, w in enumerate(wells, 1):
             w.well_name = f"{p.formation}-{k:02d}"
@@ -285,8 +297,10 @@ def generate_wine_rack(
     az = _resolve_azimuth(parcel, window0, base)
     # Fix ONE turn end for the whole deal so zones don't mix north/south turns
     # (every well drills from one surface side); auto-pick the higher-footage side.
+    # 'auto' -> fix one footage-max side for the deal; 'north'/'south' -> each zone
+    # resolves the same turn end from drill_from + the shared azimuth (consistent).
     u = base.well_type == "uturn" and base.spacing_ft >= base.uturn_min_leg_to_leg_ft
-    if u and base.turn_at_high is None:
+    if u and base.drill_from == "auto" and base.turn_at_high is None:
         base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base))
     zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
 
