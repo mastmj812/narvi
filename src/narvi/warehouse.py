@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import psycopg
 from dotenv import load_dotenv
 from pyproj import CRS, Transformer
+from shapely.geometry import LineString
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
 
@@ -571,13 +572,16 @@ def inventory_from_warehouse(
     parcel: BaseGeometry,
     buffer_ft: float = 1320.0,
     categories: tuple[str, ...] = ("pdp", "pud", "res"),
+    min_overlap_frac: float = 0.30,
 ) -> list[InventoryWell]:
-    """Adopt the EXISTING inventory in/around a parcel as InventoryWells — the
-    curate-mode baseline. PDP producers (curated.wells_enriched, landing->bottom-
-    hole leg) and Novi PUD/RES sticks (curated.intel_locations + intel_formation_
-    blueox) become single-leg wells tagged by `category`, so the same viz renders
-    all three and the user curates by bench/category. gunbarrel_x is the cross-
-    section offset (perpendicular to the grid azimuth), centered on the set."""
+    """Adopt the EXISTING inventory IN a parcel as InventoryWells — the curate-mode
+    baseline. PDP producers (curated.wells_enriched, landing->bottom-hole leg) and
+    Novi PUD/RES sticks (curated.intel_locations + intel_formation_blueox) become
+    single-leg wells tagged by `category`. A well belongs to the unit only if at
+    least `min_overlap_frac` of its lateral runs INSIDE the parcel (co-extent
+    overlap, never min-distance) — so a long lateral that merely clips the edge on
+    its way to a neighbouring unit is excluded. gunbarrel_x is the cross-section
+    offset (perpendicular to the grid azimuth), centered on the kept set."""
     aoi = parcel_to_ewkt_4326(parcel)
     buf_m = buffer_ft / FT_PER_M
     az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
@@ -600,10 +604,42 @@ def inventory_from_warehouse(
                     items.append(_passthrough_well(fb, tvd, uid, uid, cat,
                                                    hlon, hlat, tlon, tlat, az, len(items) + 1))
 
-    if not items:
+    # keep only laterals that substantially overlap the unit (co-extent overlap)
+    kept: list[tuple[InventoryWell, tuple[float, float]]] = []
+    for well, cross in items:
+        leg = well.legs[0]
+        line = LineString([leg.heel_xy, leg.toe_xy])
+        if line.length <= 0:
+            continue
+        if line.intersection(parcel).length / line.length >= min_overlap_frac:
+            kept.append((well, cross))
+
+    if not kept:
         return []
     # center the cross-section so the gun-barrel spreads around 0
-    mean_cross = sum(cx * perp[0] + cy * perp[1] for _, (cx, cy) in items) / len(items)
-    for well, (cx, cy) in items:
+    mean_cross = sum(cx * perp[0] + cy * perp[1] for _, (cx, cy) in kept) / len(kept)
+    for well, (cx, cy) in kept:
         well.legs[0].gunbarrel_x_ft = round((cx * perp[0] + cy * perp[1] - mean_cross) * FT_PER_M, 1)
-    return [w for w, _ in items]
+    return [w for w, _ in kept]
+
+
+def bench_summary(wells: list[InventoryWell]) -> list[BenchInfo]:
+    """Bench menu derived from a kept inventory set, so the panel and the map agree
+    exactly. Counts per category + median landing TVD per formation_blueox; spacing
+    left None (Novi's pass-through layout is the baseline, nothing to seed)."""
+    agg: dict[str, dict] = {}
+    for w in wells:
+        d = agg.setdefault(w.formation, {"pdp": 0, "pud": 0, "res": 0, "tvds": []})
+        if w.category in ("pdp", "pud", "res"):
+            d[w.category] += 1
+        if w.target_tvd_ft:
+            d["tvds"].append(w.target_tvd_ft)
+    out: list[BenchInfo] = []
+    for fb, d in agg.items():
+        med = round(_median(d["tvds"]), 0) if d["tvds"] else None
+        srcs = [f"{d[k]} {k.upper()}" for k in ("pdp", "pud", "res") if d[k]]
+        note = (f"{fb} @ {med:,.0f} ft TVD ({', '.join(srcs)})"
+                if med is not None else f"{fb} ({', '.join(srcs)})")
+        out.append(BenchInfo(fb, med, d["pdp"], d["pud"], d["res"], None, note))
+    out.sort(key=lambda b: b.median_tvd_ft if b.median_tvd_ft is not None else 1e9)
+    return out

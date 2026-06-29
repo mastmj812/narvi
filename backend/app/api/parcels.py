@@ -15,7 +15,7 @@ from narvi import (
     synthetic_section,
 )
 from narvi.viz import _to_wgs_geom
-from narvi.warehouse import available_benches, inventory_from_warehouse
+from narvi.warehouse import bench_summary, inventory_from_warehouse
 
 from ..deps import get_conn
 from ..models import (
@@ -37,8 +37,10 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     as InventoryWells (the curate baseline) + the bench menu. Drives the initial
     map + gun-barrel before any curation."""
     parcel = parcel_from_geojson(req.parcel)
-    wells = inventory_from_warehouse(conn, parcel, req.buffer_ft, tuple(req.categories))
-    benches = available_benches(conn, parcel, buffer_ft=req.buffer_ft)
+    # wide pre-filter so any lateral overlapping the unit is fetched; membership is
+    # then decided by co-extent overlap inside inventory_from_warehouse.
+    wells = inventory_from_warehouse(conn, parcel, 5280.0, tuple(req.categories))
+    benches = bench_summary(wells)
     return InventoryResponse(
         well_count=len(wells),
         geojson=scenario_geojson(parcel, None, wells),

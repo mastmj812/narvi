@@ -123,17 +123,18 @@ export function MapView() {
     src?.setData(fc);
   }, [fc, ready]);
 
-  // re-fit only when the underlying parcel/scenario changes, not on every toggle
+  // re-fit to the PARCEL (the unit is the focus) when it changes — not to the
+  // well sprawl, which can extend a couple miles past the unit on 2-mile laterals.
   useEffect(() => {
     if (!ready) return;
     const map = mapRef.current;
     if (!map) return;
-    const base = appMode === "override"
-      ? (result?.geojson ?? (parcel ? parcelOnly(parcel.geojson) : EMPTY_FC))
-      : (inventory?.geojson ?? (parcel ? parcelOnly(parcel.geojson) : EMPTY_FC));
+    const base = parcel
+      ? parcelOnly(parcel.geojson)
+      : appMode === "override" ? (result?.geojson ?? EMPTY_FC) : EMPTY_FC;
     const b = fcBounds(base);
-    if (b) map.fitBounds(b, { padding: 60, maxZoom: 14, duration: 600 });
-  }, [parcel, inventory, result, appMode, ready]);
+    if (b) map.fitBounds(b, { padding: 90, maxZoom: 14, duration: 600 });
+  }, [parcel, result, appMode, ready]);
 
   return <div ref={containerRef} className="map-root" />;
 }
