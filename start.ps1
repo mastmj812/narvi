@@ -1,18 +1,7 @@
 # narvi dev launcher — opens the FastAPI backend (:8078) and the Vite frontend
-# (:5176) each in their own window, and keeps THIS window open so any error stays
-# visible. Run it from a PowerShell prompt in the narvi folder:
-#
-#     .\start.ps1
-#
-# If you get a script-blocked error, run it once as:
-#     powershell -ExecutionPolicy Bypass -File .\start.ps1
+# (:5176) each in their own window. Easiest: double-click start.cmd.
+# Or from a PowerShell prompt in the narvi folder:  .\start.ps1
 param([switch]$NoBrowser)
-
-$ErrorActionPreference = "Stop"
-$root = $PSScriptRoot
-$python = Join-Path $root ".venv\Scripts\python.exe"
-$backend = Join-Path $root "backend"
-$frontend = Join-Path $root "frontend"
 
 function Pause-Exit($msg) {
     Write-Host ""
@@ -32,38 +21,49 @@ function Wait-Port($port, $timeoutSec = 40) {
     return $false
 }
 
-if (-not (Test-Path $python)) {
-    Pause-Exit "Python venv not found at $python. Create it: python -m venv .venv ; then pip install -e ."
-}
+try {
+    $root = $PSScriptRoot
+    if (-not $root) { $root = Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $python = Join-Path $root ".venv\Scripts\python.exe"
+    $backend = Join-Path $root "backend"
+    $frontend = Join-Path $root "frontend"
+    $src = Join-Path $root "src"
 
-# --- Backend (uvicorn :8078) in its own window (stays open via -NoExit) ---
-# --reload-dir watches BOTH backend/app AND src/narvi (the editable engine) — without
-# the src/narvi dir, changes to the engine are NOT picked up until a manual restart.
-Write-Host "starting backend on http://127.0.0.1:8078 ..." -ForegroundColor Cyan
-$src = Join-Path $root "src"
-$backendCmd = "`$host.ui.RawUI.WindowTitle='narvi backend (:8078)'; Set-Location '$backend'; " +
-    "& '$python' -m uvicorn app.main:app --port 8078 --reload --reload-dir '$backend' --reload-dir '$src'"
-Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $backendCmd
-
-# --- Frontend (vite :5176) in its own window, if it exists ---
-if (Test-Path (Join-Path $frontend "package.json")) {
-    if (-not (Test-Path (Join-Path $frontend "node_modules"))) {
-        Write-Host "frontend deps not installed — run 'npm install' in frontend\ first." -ForegroundColor Yellow
+    if (-not (Test-Path $python)) {
+        Pause-Exit "Python venv not found at $python.`nCreate it: python -m venv .venv ; then pip install -e ."
     }
-    Write-Host "starting frontend on http://localhost:5176 ..." -ForegroundColor Cyan
-    $frontendCmd = "`$host.ui.RawUI.WindowTitle='narvi frontend (:5176)'; Set-Location '$frontend'; npm run dev"
-    Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $frontendCmd
-    if (-not $NoBrowser) {
-        Write-Host "waiting for the frontend on :5176 (first compile + basemap can take a few seconds) ..." -ForegroundColor Cyan
-        [void](Wait-Port 5176 40)
-        Start-Process "http://localhost:5176"
-    }
-} else {
-    Write-Host "frontend/ not built yet — backend only. API docs: http://127.0.0.1:8078/docs" -ForegroundColor Yellow
-}
 
-Write-Host ""
-Write-Host "Two windows should now be open (backend + frontend)." -ForegroundColor Green
-Write-Host "  app:      http://localhost:5176" -ForegroundColor Green
-Write-Host "  api docs: http://127.0.0.1:8078/docs" -ForegroundColor Green
-Read-Host "This launcher can be closed with Enter (the two server windows keep running)"
+    # --- Backend (uvicorn :8078) in its own window (stays open via -NoExit) ---
+    # --reload-dir watches backend/app AND src/narvi (the editable engine), else
+    # engine edits aren't picked up until a manual restart.
+    Write-Host "starting backend on http://127.0.0.1:8078 ..." -ForegroundColor Cyan
+    $backendCmd = "`$host.ui.RawUI.WindowTitle='narvi backend (:8078)'; Set-Location '$backend'; " +
+        "& '$python' -m uvicorn app.main:app --port 8078 --reload --reload-dir '$backend' --reload-dir '$src'"
+    Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $backendCmd
+
+    # --- Frontend (vite :5176) in its own window ---
+    if (Test-Path (Join-Path $frontend "package.json")) {
+        if (-not (Test-Path (Join-Path $frontend "node_modules"))) {
+            Write-Host "frontend deps not installed - run 'npm install' in frontend\ first." -ForegroundColor Yellow
+        }
+        Write-Host "starting frontend on http://localhost:5176 ..." -ForegroundColor Cyan
+        $frontendCmd = "`$host.ui.RawUI.WindowTitle='narvi frontend (:5176)'; Set-Location '$frontend'; npm run dev"
+        Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $frontendCmd
+        if (-not $NoBrowser) {
+            Write-Host "waiting for the frontend on :5176 (first compile + basemap take a few seconds) ..." -ForegroundColor Cyan
+            [void](Wait-Port 5176 40)
+            Start-Process "http://localhost:5176"
+        }
+    } else {
+        Write-Host "frontend/ not built yet - backend only. API docs: http://127.0.0.1:8078/docs" -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Host "Two windows should now be open (backend + frontend)." -ForegroundColor Green
+    Write-Host "  app:      http://localhost:5176" -ForegroundColor Green
+    Write-Host "  api docs: http://127.0.0.1:8078/docs" -ForegroundColor Green
+    Read-Host "This launcher can be closed with Enter (the two server windows keep running)"
+}
+catch {
+    Pause-Exit "LAUNCHER ERROR: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
+}
