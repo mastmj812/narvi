@@ -113,6 +113,16 @@ def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: floa
     return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset)[0])
 
 
+def _dropped_short(window: BaseGeometry, az: float, p: ScenarioParams, offset: float) -> int:
+    """Rows that would place but for the min-lateral filter — the short edge
+    laterals on an irregular/tapering parcel, which is why a placement can cluster
+    in the fuller middle of the unit."""
+    if p.min_lateral_ft <= 0:
+        return 0
+    full = _count_legs(window, az, replace(p, min_lateral_ft=0.0), offset)
+    return max(0, full - _count_legs(window, az, p, offset))
+
+
 def _best_offset(window: BaseGeometry, az: float, p: ScenarioParams) -> float:
     """Pick the row phase (0 or spacing/2) that fits more legs (max_count)."""
     half = p.spacing_ft / 2.0
@@ -183,6 +193,7 @@ def generate_scenario(
     for w in wells:
         w.lateral_azimuth_deg = round(az, 1)
 
+    dropped = _dropped_short(window, az, p, row_offset_ft)
     n_legs = sum(len(w.legs) for w in wells)
     feas = Feasibility(
         requested=None, placed=len(wells), legs=n_legs,
@@ -192,7 +203,9 @@ def generate_scenario(
               f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
               f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
               + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
-                 f"floor -> singles]" if floored else "")),
+                 f"floor -> singles]" if floored else "")
+              + (f"  [{dropped} edge lateral{'s' if dropped != 1 else ''} < {p.min_lateral_ft:.0f} ft "
+                 f"min dropped -> fewer toward the parcel edges]" if dropped else "")),
     )
     return wells, window, feas
 
