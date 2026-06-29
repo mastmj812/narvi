@@ -16,7 +16,8 @@ import {
 export type AppMode = "curate" | "override";
 
 const DEFAULT_PARAMS: Params = {
-  spacing_ft: 880, setback_ft: 200, formation: "WCA_1", target_tvd_ft: 11000,
+  // 330 ft setback is the typical section-line legal setback (default).
+  spacing_ft: 880, setback_ft: 330, formation: "WCA_1", target_tvd_ft: 11000,
   well_type: "single", objective: "max_lateral", drill_from: "auto",
   azimuth_deg: null, min_lateral_ft: 4000,
 };
