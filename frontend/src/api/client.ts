@@ -30,6 +30,7 @@ export interface GunbarrelData {
   formations: { formation: string; color: string }[];
   points: {
     well_name: string; formation: string; color: string; well_type: string;
+    category: string; novi_wellname: string | null;
     offset_ft: number; tvd_ft: number;
   }[];
   links: {
@@ -54,6 +55,25 @@ export interface ParcelInfo {
   area_ac: number;
   geojson: GeoJSON.Geometry;
 }
+
+export interface BenchInfo {
+  formation: string;
+  median_tvd_ft: number | null;
+  n_pdp: number;
+  n_pud: number;
+  n_res: number;
+  suggested_spacing_ft: number | null;
+  note: string;
+}
+
+export interface InventoryResponse {
+  well_count: number;
+  geojson: GeoJSON.FeatureCollection;
+  gunbarrel: GunbarrelData;
+  benches: BenchInfo[];
+}
+
+export type Category = "pdp" | "pud" | "res";
 
 export interface ScenarioSummary {
   deal_id: string;
@@ -87,6 +107,9 @@ export const api = {
   generate: (req: GenerateRequest) => jpost<GenerateResponse>("/api/generate", req),
 
   syntheticParcel: () => jget<ParcelInfo>("/api/parcels/synthetic"),
+
+  inventory: (parcel: GeoJSON.Geometry, buffer_ft = 330, categories: Category[] = ["pdp", "pud", "res"]) =>
+    jpost<InventoryResponse>("/api/parcels/inventory", { parcel, buffer_ft, categories }),
 
   uploadParcels: async (file: File): Promise<{ parcels: ParcelInfo[] }> => {
     const fd = new FormData();

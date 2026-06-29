@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, {
   type GeoJSONSource,
   type LngLatBoundsLike,
@@ -9,8 +9,15 @@ import { Protocol } from "pmtiles";
 import layers from "protomaps-themes-base";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import { useStore } from "./store";
+import { filterFC, useStore } from "./store";
 import { SCENARIO_LAYERS, SCENARIO_SOURCE } from "./map/scenarioLayers";
+
+function parcelOnly(geom: GeoJSON.Geometry): GeoJSON.FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: [{ type: "Feature", geometry: geom, properties: { kind: "parcel" } }],
+  };
+}
 
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: "FeatureCollection", features: [] };
 
@@ -64,8 +71,21 @@ export function MapView() {
   const mapRef = useRef<MlMap | null>(null);
   const [ready, setReady] = useState(false);
 
+  const appMode = useStore((s) => s.appMode);
+  const inventory = useStore((s) => s.inventory);
+  const keptBenches = useStore((s) => s.keptBenches);
+  const cats = useStore((s) => s.cats);
   const result = useStore((s) => s.result);
   const parcel = useStore((s) => s.parcel);
+
+  const fc = useMemo<GeoJSON.FeatureCollection>(() => {
+    if (appMode === "override") {
+      if (result) return result.geojson;
+      return parcel ? parcelOnly(parcel.geojson) : EMPTY_FC;
+    }
+    if (inventory) return filterFC(inventory.geojson, keptBenches, cats);
+    return parcel ? parcelOnly(parcel.geojson) : EMPTY_FC;
+  }, [appMode, inventory, keptBenches, cats, result, parcel]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -96,25 +116,24 @@ export function MapView() {
     };
   }, []);
 
+  // update the rendered data whenever the (filtered) FC changes
+  useEffect(() => {
+    if (!ready) return;
+    const src = mapRef.current?.getSource(SCENARIO_SOURCE) as GeoJSONSource | undefined;
+    src?.setData(fc);
+  }, [fc, ready]);
+
+  // re-fit only when the underlying parcel/scenario changes, not on every toggle
   useEffect(() => {
     if (!ready) return;
     const map = mapRef.current;
     if (!map) return;
-    const src = map.getSource(SCENARIO_SOURCE) as GeoJSONSource | undefined;
-    if (!src) return;
-
-    let fc: GeoJSON.FeatureCollection | undefined = result?.geojson;
-    if (!fc && parcel) {
-      fc = {
-        type: "FeatureCollection",
-        features: [{ type: "Feature", geometry: parcel.geojson, properties: { kind: "parcel" } }],
-      };
-    }
-    fc = fc ?? EMPTY_FC;
-    src.setData(fc);
-    const b = fcBounds(fc);
+    const base = appMode === "override"
+      ? (result?.geojson ?? (parcel ? parcelOnly(parcel.geojson) : EMPTY_FC))
+      : (inventory?.geojson ?? (parcel ? parcelOnly(parcel.geojson) : EMPTY_FC));
+    const b = fcBounds(base);
     if (b) map.fitBounds(b, { padding: 60, maxZoom: 14, duration: 600 });
-  }, [result, parcel, ready]);
+  }, [parcel, inventory, result, appMode, ready]);
 
   return <div ref={containerRef} className="map-root" />;
 }
