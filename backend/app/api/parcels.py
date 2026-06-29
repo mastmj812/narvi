@@ -15,7 +15,7 @@ from narvi import (
     synthetic_section,
 )
 from narvi.viz import _to_wgs_geom
-from narvi.warehouse import bench_summary, inventory_from_warehouse
+from narvi.warehouse import available_benches, bench_summary, inventory_from_warehouse
 
 from ..deps import get_conn
 from ..models import (
@@ -40,18 +40,24 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     # wide pre-filter so any lateral overlapping the unit is fetched; membership is
     # then decided by co-extent overlap inside inventory_from_warehouse.
     wells = inventory_from_warehouse(conn, parcel, 5280.0, tuple(req.categories))
-    benches = bench_summary(wells)
+    benches = bench_summary(wells)                          # overlap inventory -> curate
+    # Override designs NEW development, so its menu is the AREA's developable benches
+    # (producing TVD control within a buffer), not just what physically overlaps the
+    # unit — e.g. WCA with plenty of nearby PDP but no well crossing this parcel.
+    dev = available_benches(conn, parcel, buffer_ft=5280.0)
+
+    def _bm(b):
+        return BenchInfoModel(
+            formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
+            n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
+            note=b.note)
+
     return InventoryResponse(
         well_count=len(wells),
         geojson=scenario_geojson(parcel, None, wells),
         gunbarrel=gunbarrel_data(wells),
-        benches=[
-            BenchInfoModel(
-                formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
-                n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
-                note=b.note)
-            for b in benches
-        ],
+        benches=[_bm(b) for b in benches],
+        dev_benches=[_bm(b) for b in dev],
     )
 
 

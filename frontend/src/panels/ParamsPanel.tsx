@@ -21,7 +21,7 @@ function NumberField<K extends keyof Params>({ label, k, step }: { label: string
 export function ParamsPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const {
-    parcel, parcels, mode, params, sourceAzimuth, winerackFormations, benches,
+    parcel, parcels, mode, params, sourceAzimuth, winerackFormations, devBenches,
     result, loading, error,
     selectParcel, setMode, setParam, setSourceAzimuth, toggleWinerackFormation,
     loadSynthetic, uploadParcels, generate,
@@ -111,21 +111,26 @@ export function ParamsPanel() {
 
       {mode === "winerack" && (
         <div className="section">
-          <h2>Benches (warehouse TVD)</h2>
-          {benches.length === 0 && <div className="note">select a parcel to discover its benches</div>}
-          {benches.map((b) => (
-            <div className="field" key={b.formation}>
-              <label>{b.formation}
-                {b.median_tvd_ft != null && (
-                  <span style={{ color: "var(--muted)" }}> {b.median_tvd_ft.toLocaleString()}'</span>
-                )}
-              </label>
-              <input
-                type="checkbox" checked={winerackFormations.includes(b.formation)}
-                onChange={() => toggleWinerackFormation(b.formation)}
-              />
-            </div>
-          ))}
+          <h2>Benches (developable in area)</h2>
+          {devBenches.length === 0 && <div className="note">select a parcel to discover its benches</div>}
+          {devBenches.map((b) => {
+            const thin = b.n_pdp < 3;   // < 3 producers -> no confident landing TVD
+            return (
+              <div className="field" key={b.formation}>
+                <label title={thin ? `only ${b.n_pdp} PDP nearby - thin TVD control` : `${b.n_pdp} PDP`}>
+                  {b.formation}
+                  {b.median_tvd_ft != null && (
+                    <span style={{ color: "var(--muted)" }}> {b.median_tvd_ft.toLocaleString()}' · {b.n_pdp} PDP</span>
+                  )}
+                  {thin && <span style={{ color: "#f59e0b" }}> ⚠</span>}
+                </label>
+                <input
+                  type="checkbox" checked={winerackFormations.includes(b.formation)}
+                  onChange={() => toggleWinerackFormation(b.formation)}
+                />
+              </div>
+            );
+          })}
         </div>
       )}
 

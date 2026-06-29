@@ -96,7 +96,8 @@ class InventoryResponse(BaseModel):
     well_count: int
     geojson: dict[str, Any]                     # parcel + existing PDP/PUD/RES legs
     gunbarrel: dict[str, Any]
-    benches: list[BenchInfoModel]
+    benches: list[BenchInfoModel]               # overlap inventory (curate menu)
+    dev_benches: list[BenchInfoModel]           # area-developable benches (override menu)
 
 
 class SaveScenarioRequest(BaseModel):

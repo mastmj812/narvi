@@ -53,7 +53,8 @@ interface State {
 
   // curate
   inventory: InventoryResponse | null;
-  benches: BenchInfo[];
+  benches: BenchInfo[];            // overlap inventory (curate menu)
+  devBenches: BenchInfo[];         // area-developable benches (override menu)
   keptBenches: string[];
   cats: Record<Category, boolean>;
 
@@ -97,6 +98,7 @@ export const useStore = create<State>((set, get) => ({
 
   inventory: null,
   benches: [],
+  devBenches: [],
   keptBenches: [],
   cats: { pdp: true, pud: true, res: false },
 
@@ -146,12 +148,16 @@ export const useStore = create<State>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const inv = await api.inventory(s.parcel.geojson);
-      const codes = inv.benches.map((b) => b.formation);
-      const shallow = inv.benches.find((b) => b.median_tvd_ft != null);
+      // curate menu = what overlaps the unit; override menu = area-developable
+      // benches with producing TVD control (>=3 PDP), so e.g. WCA shows even with
+      // no well crossing the parcel.
+      const sourceable = inv.dev_benches.filter((b) => b.n_pdp >= 3);
+      const shallow = sourceable.find((b) => b.median_tvd_ft != null)
+        ?? inv.benches.find((b) => b.median_tvd_ft != null);
       set({
-        inventory: inv, benches: inv.benches,
-        keptBenches: codes,
-        winerackFormations: codes,
+        inventory: inv, benches: inv.benches, devBenches: inv.dev_benches,
+        keptBenches: inv.benches.map((b) => b.formation),
+        winerackFormations: sourceable.map((b) => b.formation),
         params: shallow
           ? { ...get().params, formation: shallow.formation,
               target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }

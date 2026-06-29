@@ -72,7 +72,8 @@ export interface InventoryResponse {
   well_count: number;
   geojson: GeoJSON.FeatureCollection;
   gunbarrel: GunbarrelData;
-  benches: BenchInfo[];
+  benches: BenchInfo[];        // overlap inventory (curate)
+  dev_benches: BenchInfo[];    // area-developable (override)
 }
 
 export type Category = "pdp" | "pud" | "res";
