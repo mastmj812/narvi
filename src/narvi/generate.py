@@ -289,15 +289,19 @@ def generate_wine_rack(
 
     total_wells = sum(z.wells for z in zresults)
     total_legs = sum(z.legs for z in zresults)
+    well_kind = "uturn" if any(w.turn for w in all_wells) else "single"
+    floored = base.well_type == "uturn" and base.spacing_ft < base.uturn_min_leg_to_leg_ft
     report = WineRackReport(
         zones=zresults, total_wells=total_wells, total_legs=total_legs,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in all_wells), 1),
         stagger_ft=stagger,
         min_interzone_offset_ft=round(min_off, 1) if finite else None,
         min_interzone_offset_ok=ok,
-        note=(f"{len(zs)} zones / {total_wells} wells / {total_legs} legs; stagger "
+        note=(f"{len(zs)} zones / {total_wells} {well_kind} wells / {total_legs} legs; stagger "
               f"{stagger:.0f} ft; min inter-zone offset "
               f"{('%.0f ft' % min_off) if finite else 'n/a'}"
-              + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")),
+              + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")
+              + (f"  [U-turn spacing {base.spacing_ft:.0f} < {base.uturn_min_leg_to_leg_ft:.0f} ft "
+                 f"floor -> singles]" if floored else "")),
     )
     return all_wells, window, report
