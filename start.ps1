@@ -21,6 +21,17 @@ function Pause-Exit($msg) {
     exit 1
 }
 
+function Wait-Port($port, $timeoutSec = 40) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $c = New-Object Net.Sockets.TcpClient
+            $c.Connect("127.0.0.1", $port); $c.Close(); return $true
+        } catch { Start-Sleep -Milliseconds 400 }
+    }
+    return $false
+}
+
 if (-not (Test-Path $python)) {
     Pause-Exit "Python venv not found at $python. Create it: python -m venv .venv ; then pip install -e ."
 }
@@ -43,7 +54,8 @@ if (Test-Path (Join-Path $frontend "package.json")) {
     $frontendCmd = "`$host.ui.RawUI.WindowTitle='narvi frontend (:5176)'; Set-Location '$frontend'; npm run dev"
     Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $frontendCmd
     if (-not $NoBrowser) {
-        Start-Sleep -Seconds 4
+        Write-Host "waiting for the frontend on :5176 (first compile + basemap can take a few seconds) ..." -ForegroundColor Cyan
+        [void](Wait-Port 5176 40)
         Start-Process "http://localhost:5176"
     }
 } else {
