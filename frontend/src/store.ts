@@ -117,14 +117,14 @@ export const useStore = create<State>((set, get) => ({
 
   selectParcel: (parcel) => {
     set({ parcel, result: null, inventory: null, error: null });
-    if (parcel && get().appMode === "curate") void get().fetchInventory();
+    if (parcel) void get().fetchInventory();   // benches feed BOTH curate + override
   },
 
   loadSynthetic: async () => {
     try {
       const p = await api.syntheticParcel();
       set({ parcels: [p], parcel: p, result: null, inventory: null, error: null });
-      if (get().appMode === "curate") await get().fetchInventory();
+      await get().fetchInventory();
     } catch (e) { set({ error: String(e) }); }
   },
 
@@ -132,19 +132,30 @@ export const useStore = create<State>((set, get) => ({
     try {
       const { parcels } = await api.uploadParcels(file);
       set({ parcels, parcel: parcels[0] ?? null, result: null, inventory: null, error: null });
-      if (parcels[0] && get().appMode === "curate") await get().fetchInventory();
+      if (parcels[0]) await get().fetchInventory();
     } catch (e) { set({ error: String(e) }); }
   },
 
+  // Discover the parcel's actual benches (basin-correct — Delaware OR Midland)
+  // and seed both the curate keptBenches and the override wine-rack + single
+  // defaults from them, so nothing is hardcoded to one basin.
   fetchInventory: async () => {
     const s = get();
     if (!s.parcel) return;
     set({ loading: true, error: null });
     try {
       const inv = await api.inventory(s.parcel.geojson);
+      const codes = inv.benches.map((b) => b.formation);
+      const shallow = inv.benches.find((b) => b.median_tvd_ft != null);
       set({
         inventory: inv, benches: inv.benches,
-        keptBenches: inv.benches.map((b) => b.formation), loading: false,
+        keptBenches: codes,
+        winerackFormations: codes,
+        params: shallow
+          ? { ...get().params, formation: shallow.formation,
+              target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }
+          : get().params,
+        loading: false,
       });
     } catch (e) { set({ error: String(e), loading: false }); }
   },

@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { WAREHOUSE_STACK, type Params } from "../api/client";
+import { type Params } from "../api/client";
 import { useStore } from "../store";
 
 function NumberField<K extends keyof Params>({ label, k, step }: { label: string; k: K; step?: number }) {
@@ -21,7 +21,7 @@ function NumberField<K extends keyof Params>({ label, k, step }: { label: string
 export function ParamsPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const {
-    parcel, parcels, mode, params, sourceAzimuth, winerackFormations,
+    parcel, parcels, mode, params, sourceAzimuth, winerackFormations, benches,
     result, loading, error,
     selectParcel, setMode, setParam, setSourceAzimuth, toggleWinerackFormation,
     loadSynthetic, uploadParcels, generate,
@@ -102,12 +102,17 @@ export function ParamsPanel() {
       {mode === "winerack" && (
         <div className="section">
           <h2>Benches (warehouse TVD)</h2>
-          {WAREHOUSE_STACK.map((f) => (
-            <div className="field" key={f}>
-              <label>{f}</label>
+          {benches.length === 0 && <div className="note">select a parcel to discover its benches</div>}
+          {benches.map((b) => (
+            <div className="field" key={b.formation}>
+              <label>{b.formation}
+                {b.median_tvd_ft != null && (
+                  <span style={{ color: "var(--muted)" }}> {b.median_tvd_ft.toLocaleString()}'</span>
+                )}
+              </label>
               <input
-                type="checkbox" checked={winerackFormations.includes(f)}
-                onChange={() => toggleWinerackFormation(f)}
+                type="checkbox" checked={winerackFormations.includes(b.formation)}
+                onChange={() => toggleWinerackFormation(b.formation)}
               />
             </div>
           ))}
