@@ -81,6 +81,15 @@ export function ParamsPanel() {
             <option value="max_count">max count</option>
           </select>
         </div>
+        <div className="field">
+          <label title="where the row pattern hangs across the unit">anchor</label>
+          <select value={params.anchor} onChange={(e) => setParam("anchor", e.target.value as Params["anchor"])}>
+            <option value="auto">auto (max footage)</option>
+            <option value="west">west line</option>
+            <option value="east">east line</option>
+            <option value="center">center</option>
+          </select>
+        </div>
         {params.well_type === "uturn" && (
           <div className="field">
             <label title="which side the pads/heels go; the U-turn sits at the opposite end">drill from</label>

@@ -42,6 +42,10 @@ class ScenarioParams:
     # footage), or 'north' / 'south' (force the heels/pad on that side; the turn
     # goes at the opposite, deep end). Resolved to turn_at_high using the azimuth.
     drill_from: str = "auto"           # 'auto' | 'north' | 'south'
+    # where the row pattern HANGS across the unit: 'auto' (pick the side that drills
+    # more, center on a tie), 'west'/'east' (first lateral at that section-line
+    # setback), 'center' (symmetric). Matches how development anchors off a line.
+    anchor: str = "auto"               # 'auto' | 'west' | 'east' | 'center'
     # internal turn end (None = auto/from drill_from): True = turn at the high-x
     # (toe) end, False = turn at the low-x (heel) end. The wine-rack fixes ONE value
     # for the deal so zones never mix north/south turns.

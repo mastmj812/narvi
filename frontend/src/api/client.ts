@@ -3,6 +3,7 @@
 export type WellType = "single" | "uturn";
 export type Objective = "max_lateral" | "max_count";
 export type DrillFrom = "auto" | "north" | "south";
+export type Anchor = "auto" | "west" | "east" | "center";
 export type Mode = "single" | "winerack";
 
 export interface Params {
@@ -13,6 +14,7 @@ export interface Params {
   well_type: WellType;
   objective: Objective;
   drill_from: DrillFrom;
+  anchor: Anchor;
   azimuth_deg: number | null;
   min_lateral_ft: number;
 }

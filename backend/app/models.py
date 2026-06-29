@@ -25,6 +25,7 @@ class ScenarioParamsModel(BaseModel):
     well_type: Literal["single", "uturn"] = "single"
     objective: Literal["max_lateral", "max_count"] = "max_lateral"
     drill_from: Literal["auto", "north", "south"] = "auto"   # U-turn surface side
+    anchor: Literal["auto", "west", "east", "center"] = "auto"  # where rows hang
     min_lateral_ft: float = 4000.0
     uturn_min_leg_to_leg_ft: float = 990.0
     setback_ns_ft: float | None = None

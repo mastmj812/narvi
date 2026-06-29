@@ -151,11 +151,12 @@ def _drill_to_high(drill_from: str, az: float) -> bool:
     return north_is_high if drill_from == "south" else (not north_is_high)
 
 
-def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams) -> bool:
+def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams,
+                            anchor: str = "center") -> bool:
     """Pick ONE turn end for the whole deal (all wells drilled from one surface
     side): place U-turns both ways on the window and return turn_at_high for the
     orientation that drills more total completed footage."""
-    legs, centroid, phi, y_mid = laterals_rotated(window, az, p.spacing_ft, p.spacing_ft, 0.0)
+    legs, centroid, phi, y_mid = laterals_rotated(window, az, p.spacing_ft, p.spacing_ft, 0.0, anchor)
     spacing_m = p.spacing_ft / FT_PER_M
     hi = sum(w.completed_lateral_ft
              for w in _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, True))
@@ -164,18 +165,58 @@ def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams) 
     return hi >= lo
 
 
-def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float) -> int:
-    return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset)[0])
+def _place_for_anchor(window, az, p, row_offset_ft, anchor, uturn, spacing_m):
+    """Place wells for one anchor; returns (wells, dropped). U-turns try both turn
+    ends (unless fixed) and keep the better."""
+    if uturn:
+        u_legs, centroid, phi, y_mid = laterals_rotated(
+            window, az, p.spacing_ft, p.spacing_ft, row_offset_ft, anchor)
+        turn = p.turn_at_high
+        if turn is None and p.drill_from in ("north", "south"):
+            turn = _drill_to_high(p.drill_from, az)
+        if turn is None:
+            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, e)
+                     for e in (True, False)]
+            placed = max(cands, key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
+        else:
+            placed = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, turn)
+        wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
+        for k, w in enumerate(wells, 1):
+            w.well_name = f"{p.formation}-{k:02d}"
+        return wells, len(placed) - len(wells)
+    legs, centroid, phi, y_mid = laterals_rotated(
+        window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft, anchor)
+    wells = [_single_well(_make_leg(*leg, centroid, phi, y_mid), p, k + 1)
+             for k, leg in enumerate(legs)]
+    return wells, _dropped_short(window, az, p, row_offset_ft, anchor)
 
 
-def _dropped_short(window: BaseGeometry, az: float, p: ScenarioParams, offset: float) -> int:
+def _deal_anchor(window, az, p, uturn, spacing_m) -> str:
+    """Pick where the rows hang for the whole deal: the anchor that drills the most
+    completed footage (center on a tie, so a regular unit stays centered)."""
+    best_a, best_ft = "center", -1.0
+    for a in ("center", "west", "east"):
+        ws, _ = _place_for_anchor(window, az, p, 0.0, a, uturn, spacing_m)
+        ft = sum(w.completed_lateral_ft for w in ws)
+        if ft > best_ft + 1.0:                  # center first -> wins ties
+            best_a, best_ft = a, ft
+    return best_a
+
+
+def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float,
+                anchor: str = "center") -> int:
+    return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset, anchor)[0])
+
+
+def _dropped_short(window: BaseGeometry, az: float, p: ScenarioParams, offset: float,
+                   anchor: str = "center") -> int:
     """Rows that would place but for the min-lateral filter — the short edge
     laterals on an irregular/tapering parcel, which is why a placement can cluster
     in the fuller middle of the unit."""
     if p.min_lateral_ft <= 0:
         return 0
-    full = _count_legs(window, az, replace(p, min_lateral_ft=0.0), offset)
-    return max(0, full - _count_legs(window, az, p, offset))
+    full = _count_legs(window, az, replace(p, min_lateral_ft=0.0), offset, anchor)
+    return max(0, full - _count_legs(window, az, p, offset, anchor))
 
 
 def _best_offset(window: BaseGeometry, az: float, p: ScenarioParams) -> float:
@@ -224,33 +265,19 @@ def generate_scenario(
     uturn = p.well_type == "uturn" and p.spacing_ft >= p.uturn_min_leg_to_leg_ft
     floored = p.well_type == "uturn" and not uturn
 
-    if uturn:
-        # Keep short rows (floor = one spacing, enough to host the turn) so a stub
-        # can serve as the SHORT leg of an asymmetric U-turn into an irregular
-        # extension (a notched unit's corner); min_lateral is enforced on the well's
-        # COMPLETED length, not per row. Turn end: p.turn_at_high if fixed (the
-        # wine-rack sets it once for the whole deal), else auto -> keep the better.
-        u_legs, centroid, phi, y_mid = laterals_rotated(
-            window, az, p.spacing_ft, p.spacing_ft, row_offset_ft)
-        turn = p.turn_at_high                       # explicit (wine-rack sets it) wins
-        if turn is None and p.drill_from in ("north", "south"):
-            turn = _drill_to_high(p.drill_from, az)
-        if turn is None:
-            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, e)
-                     for e in (True, False)]
-            placed = max(cands, key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
-        else:
-            placed = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, turn)
-        wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
-        for k, w in enumerate(wells, 1):
-            w.well_name = f"{p.formation}-{k:02d}"
-        dropped = len(placed) - len(wells)
-    else:
-        legs, centroid, phi, y_mid = laterals_rotated(
-            window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft)
-        wells = [_single_well(_make_leg(*leg, centroid, phi, y_mid), p, k + 1)
-                 for k, leg in enumerate(legs)]
-        dropped = _dropped_short(window, az, p, row_offset_ft)
+    # Where the rows HANG across the unit. 'auto' tries center/west/east and keeps
+    # the one that drills the most (center on a tie, so a regular unit stays
+    # centered); west/east anchor the first lateral at that section-line setback,
+    # which is how development is actually laid out and which row lands in a cutout.
+    anchors = ["center", "west", "east"] if p.anchor == "auto" else [p.anchor]
+    wells: list[InventoryWell] = []
+    dropped = 0
+    best_ft = -1.0
+    for a in anchors:
+        cand, cand_dropped = _place_for_anchor(window, az, p, row_offset_ft, a, uturn, spacing_m)
+        ft = sum(w.completed_lateral_ft for w in cand)
+        if ft > best_ft + 1.0:                      # center first -> wins ties
+            wells, dropped, best_ft = cand, cand_dropped, ft
 
     for w in wells:
         w.lateral_azimuth_deg = round(az, 1)
@@ -295,13 +322,16 @@ def generate_wine_rack(
     ew = base.setback_ew_ft if base.setback_ew_ft is not None else base.setback_ft
     window0 = drillable_window(parcel, ns, ew)
     az = _resolve_azimuth(parcel, window0, base)
-    # Fix ONE turn end for the whole deal so zones don't mix north/south turns
-    # (every well drills from one surface side); auto-pick the higher-footage side.
-    # 'auto' -> fix one footage-max side for the deal; 'north'/'south' -> each zone
-    # resolves the same turn end from drill_from + the shared azimuth (consistent).
     u = base.well_type == "uturn" and base.spacing_ft >= base.uturn_min_leg_to_leg_ft
+    spacing_m = base.spacing_ft / FT_PER_M
+    # Fix the row anchor ONCE for the deal (zones share where development hangs).
+    if base.anchor == "auto":
+        base = replace(base, anchor=_deal_anchor(window0, az, base, u, spacing_m))
+    # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
+    # side); auto-pick the higher-footage side, evaluated at the chosen anchor.
+    # 'north'/'south' -> each zone resolves the same end from drill_from + the az.
     if u and base.drill_from == "auto" and base.turn_at_high is None:
-        base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base))
+        base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base, base.anchor))
     zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
 
     all_wells: list[InventoryWell] = []

@@ -88,11 +88,15 @@ def laterals_rotated(
     spacing_ft: float,
     min_lateral_ft: float,
     row_offset_ft: float = 0.0,
+    anchor: str = "center",
 ) -> tuple[list[tuple[float, float, float]], Point, float, float]:
     """Place parallel rows along `azimuth_deg`. Returns (legs, centroid, phi, y_mid)
     where legs = [(y, x_heel, x_toe), ...] in the rotated frame (azimuth -> +x),
     sorted by y. `row_offset_ft` phase-shifts the rows (the wine-rack stagger across
-    zones). Map a rotated point back to the work CRS with unrotate()."""
+    zones). `anchor` sets where the row pattern HANGS — 'center' (rows symmetric
+    about the unit), 'west' / 'east' (first lateral at that section-line setback,
+    stepping across) — which is how development is actually laid out and which row
+    falls in an irregular cutout. Map a rotated point back with unrotate()."""
     if window.is_empty:
         return [], window.centroid, 0.0, 0.0
 
@@ -104,8 +108,19 @@ def laterals_rotated(
     min_m = min_lateral_ft / FT_PER_M
     y_mid = (miny + maxy) / 2.0
 
-    # rows at y_mid + offset + k*spacing, k chosen to span the whole window
-    base = y_mid + row_offset_ft / FT_PER_M
+    if anchor == "center":
+        anchor_y = y_mid
+    else:
+        # rotated +y is one cross-section direction; find which y-edge is WEST
+        # (smaller Easting in the work CRS) so 'west'/'east' map correctly.
+        xmid = (minx + maxx) / 2.0
+        e_lo = rotate(Point(xmid, miny), phi, origin=centroid, use_radians=False).x
+        e_hi = rotate(Point(xmid, maxy), phi, origin=centroid, use_radians=False).x
+        west_y, east_y = (miny, maxy) if e_lo <= e_hi else (maxy, miny)
+        anchor_y = west_y if anchor == "west" else east_y
+
+    # rows at anchor + offset + k*spacing, k chosen to span the whole window
+    base = anchor_y + row_offset_ft / FT_PER_M
     k_lo = math.ceil((miny - base) / spacing_m)
     k_hi = math.floor((maxy - base) / spacing_m)
     legs: list[tuple[float, float, float]] = []

@@ -15,7 +15,7 @@ from narvi import (
 
 def _params(**kw):
     base = dict(formation="WCA_1", target_tvd_ft=11500, azimuth_deg=0.0,
-                spacing_ft=880, setback_ft=200, min_lateral_ft=4000)
+                spacing_ft=880, setback_ft=200, min_lateral_ft=4000, anchor="center")
     base.update(kw)
     return ScenarioParams(**base)
 
