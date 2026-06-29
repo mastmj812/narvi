@@ -36,7 +36,18 @@ Create `.env` (gitignored) with the warehouse `DB_*` keys (host/port/name/user/p
 ## Run
 
 ```powershell
-.\start.ps1            # backend on :8078 (frontend on :5176 once it exists)
+.\start.ps1            # backend on :8078 + frontend on :5176
+```
+
+Or run the two processes manually (note the `--reload-dir ..\src` — without it,
+uvicorn's reloader watches only `backend/` and will NOT pick up edits to the
+`src/narvi` engine):
+
+```powershell
+# backend
+cd backend; ..\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8078 --reload --reload-dir . --reload-dir ..\src
+# frontend (separate window)
+cd frontend; npm run dev
 ```
 
 API docs at `http://127.0.0.1:8078/docs`. Key endpoints (all under `/api`):

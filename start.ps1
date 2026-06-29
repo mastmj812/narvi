@@ -26,8 +26,12 @@ if (-not (Test-Path $python)) {
 }
 
 # --- Backend (uvicorn :8078) in its own window (stays open via -NoExit) ---
+# --reload-dir watches BOTH backend/app AND src/narvi (the editable engine) — without
+# the src/narvi dir, changes to the engine are NOT picked up until a manual restart.
 Write-Host "starting backend on http://127.0.0.1:8078 ..." -ForegroundColor Cyan
-$backendCmd = "Set-Location '$backend'; & '$python' -m uvicorn app.main:app --port 8078 --reload"
+$src = Join-Path $root "src"
+$backendCmd = "Set-Location '$backend'; & '$python' -m uvicorn app.main:app --port 8078 " +
+    "--reload --reload-dir '$backend' --reload-dir '$src'"
 Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $backendCmd
 
 # --- Frontend (vite :5176) in its own window, if it exists ---
