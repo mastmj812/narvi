@@ -527,21 +527,28 @@ _PDP_SQL = """
       AND ST_DWithin(wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
 """
 
+# PUD sticks are filtered through the §6 reconciliation (curated.reconciled_
+# inventory): only genuinely-remaining inventory (remaining_pud) and ambiguous
+# (conflict) are real drillable locations — realized_drift/realized_phantom are
+# already drilled, so they're NOT shown. RES isn't reconciled (pass-through).
 _STICK_SQL = """
-    SELECT ifb.formation_blueox, il.tvd, il.unique_id, lower(il.category),
+    SELECT ifb.formation_blueox, il.tvd, il.unique_id, lower(il.category), ri.status,
            ST_X(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
            ST_Y(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
            ST_X(ST_EndPoint(ST_LineMerge(il.wellstick_geom))),
            ST_Y(ST_EndPoint(ST_LineMerge(il.wellstick_geom)))
     FROM curated.intel_locations il
     JOIN curated.intel_formation_blueox ifb USING (stick_id)
+    LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
     WHERE il.category = ANY(%(cats)s) AND il.wellstick_geom IS NOT NULL
       AND ifb.formation_blueox IS NOT NULL
       AND ST_DWithin(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+      AND (il.category = 'RES' OR ri.status IN ('remaining_pud', 'conflict'))
 """
 
 
-def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az, n):
+def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az, n,
+                      recon_status=None):
     """Build a single-leg InventoryWell from a warehouse lateral (heel->toe in
     lon/lat). Returns (well, cross_m) where cross_m is the well's work-CRS centroid
     for the cross-section projection; gunbarrel_x is set by the caller once the
@@ -562,7 +569,7 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
         legs=[leg], turn=None,
         completed_lateral_ft=round(length_ft, 1), drilled_lateral_ft=round(length_ft, 1),
         nearest_neighbor_spacing_ft=0.0, setback_ft=0.0,
-        category=category, novi_wellname=novi,
+        category=category, novi_wellname=novi, recon_status=recon_status,
     )
     return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
 
@@ -599,10 +606,11 @@ def inventory_from_warehouse(
         stick_cats = [c.upper() for c in categories if c in ("pud", "res")]
         if stick_cats:
             cur.execute(_STICK_SQL, {"aoi": aoi, "buf": buf_m, "cats": stick_cats})
-            for fb, tvd, uid, cat, hlon, hlat, tlon, tlat in cur.fetchall():
+            for fb, tvd, uid, cat, status, hlon, hlat, tlon, tlat in cur.fetchall():
                 if None not in (hlon, hlat, tlon, tlat):
                     items.append(_passthrough_well(fb, tvd, uid, uid, cat,
-                                                   hlon, hlat, tlon, tlat, az, len(items) + 1))
+                                                   hlon, hlat, tlon, tlat, az, len(items) + 1,
+                                                   recon_status=status))
 
     # keep only laterals that substantially overlap the unit (co-extent overlap)
     kept: list[tuple[InventoryWell, tuple[float, float]]] = []

@@ -90,6 +90,9 @@ class InventoryWell:
     category: str = "generated"
     novi_wellname: str | None = None   # set for pud/res pass-through
     edited: bool = False               # user-moved (capstone: gun-barrel drag)
+    # §6 reconciliation status for PUD pass-through (remaining_pud | conflict);
+    # realized_* PUDs are filtered out upstream (already drilled, not inventory).
+    recon_status: str | None = None
 
 
 @dataclass

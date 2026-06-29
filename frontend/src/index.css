@@ -70,12 +70,27 @@ button.ghost {
 /* map + overlays */
 .map-wrap { position: relative; }
 .map-root { position: absolute; inset: 0; }
-.gunbarrel {
-  position: absolute; right: 12px; bottom: 12px; width: 360px; height: 240px;
-  background: rgba(255,255,255,.95); border: 1px solid var(--line); border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0,0,0,.12); padding: 8px;
+
+/* draggable + resizable floating window (gun-barrel) — mirrors erebor .floatwin */
+.floatwin {
+  position: fixed; z-index: 6; display: flex; flex-direction: column;
+  width: 440px; height: 300px; min-width: 300px; min-height: 190px;
+  max-width: 96vw; max-height: 88vh;
+  background: rgba(255,255,255,.97); border: 1px solid #d4d4d8; border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.2); resize: both; overflow: hidden;
 }
-.gunbarrel h3 { margin: 0 0 4px; font-size: 12px; }
+.win-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 6px 10px; cursor: move; user-select: none;
+  background: #f4f4f5; border-bottom: 1px solid #e4e4e7; border-radius: 8px 8px 0 0;
+}
+.win-title { font-size: 12px; font-weight: 600; color: #3f3f46; }
+.win-body { flex: 1; overflow: hidden; padding: 2px 4px; }
+.gb-foot {
+  display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
+  padding: 4px 8px; font-size: 10px; color: #52525b; border-top: 1px solid #eee;
+}
+.gb-foot span { display: inline-flex; align-items: center; gap: 3px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; margin-top: 4px; }
 .legend span { display: inline-flex; align-items: center; gap: 4px; }
 .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }

@@ -1,12 +1,42 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GunbarrelData } from "../api/client";
 import { colorForBlueox } from "../map/formations";
 import { catActive, useStore } from "../store";
 
-const W = 344, H = 180, PAD = 28;
+const M = { l: 46, r: 12, t: 10, b: 22 };
 
-// Cross-section: offset_ft on x, TVD on y (deeper = lower). Colored by the shared
-// formation_blueox palette; filtered to the kept benches + active categories.
+// Marker convention mirrors erebor: PDP = solid circle, PUD = hollow (white) circle,
+// RES = hollow triangle. Color = formation_blueox.
+function Marker({ cat, cx, cy, color }: { cat: string; cx: number; cy: number; color: string }) {
+  const r = 4;
+  const hollow = cat === "pud" || cat === "res";
+  const paint = {
+    fill: hollow ? "#ffffff" : color,
+    stroke: hollow ? color : "#3f3f46",
+    strokeWidth: hollow ? 1.5 : 0.7,
+    opacity: cat === "res" ? 0.85 : 1,
+  };
+  if (cat === "res")
+    return <polygon points={`${cx},${cy - r} ${cx - r},${cy + r} ${cx + r},${cy + r}`} {...paint} />;
+  return <circle cx={cx} cy={cy} r={r} {...paint} />;
+}
+
+function useElementSize() {
+  const [size, setSize] = useState({ width: 400, height: 220 });
+  const roRef = useRef<ResizeObserver | null>(null);
+  const ref = useCallback((node: HTMLDivElement | null) => {
+    roRef.current?.disconnect();
+    if (!node) return;
+    const ro = new ResizeObserver((e) => {
+      const cr = e[0].contentRect;
+      setSize({ width: cr.width, height: cr.height });
+    });
+    ro.observe(node);
+    roRef.current = ro;
+  }, []);
+  return [ref, size] as const;
+}
+
 export function GunBarrel() {
   const appMode = useStore((s) => s.appMode);
   const inventory = useStore((s) => s.inventory);
@@ -24,48 +54,72 @@ export function GunBarrel() {
     const points = raw.points.filter((p) => keep(p.formation, p.category));
     const links = raw.links.filter((l) => keptSet.has(l.formation));
     const forms = [...new Set(points.map((p) => p.formation))]
-      .sort((a, b) => {
-        const ta = points.find((p) => p.formation === a)!.tvd_ft;
-        const tb = points.find((p) => p.formation === b)!.tvd_ft;
-        return ta - tb;
-      })
+      .sort((a, b) =>
+        points.find((p) => p.formation === a)!.tvd_ft - points.find((p) => p.formation === b)!.tvd_ft)
       .map((formation) => ({ formation, color: colorForBlueox(formation) }));
     return { formations: forms, points, links };
   }, [appMode, inventory, result, keptBenches, cats]);
 
+  const [pos, setPos] = useState(() => ({
+    x: Math.max(20, window.innerWidth - 460), y: Math.max(60, window.innerHeight - 320),
+  }));
+  const [dragging, setDragging] = useState(false);
+  const off = useRef({ dx: 0, dy: 0 });
+  const [bodyRef, size] = useElementSize();
+
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: MouseEvent) => setPos({ x: e.clientX - off.current.dx, y: e.clientY - off.current.dy });
+    const onUp = () => setDragging(false);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+  }, [dragging]);
+
   if (!gb || gb.points.length === 0) return null;
 
-  const xs = gb.points.map((p) => p.offset_ft);
-  const ys = gb.points.map((p) => p.tvd_ft);
+  const onHeadDown = (e: React.MouseEvent) => {
+    off.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
+    setDragging(true);
+    e.preventDefault();
+  };
+
+  const W = size.width, H = size.height;
+  const xs = gb.points.map((p) => p.offset_ft), ys = gb.points.map((p) => p.tvd_ft);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const spanX = maxX - minX || 1, spanY = maxY - minY || 1;
-  const sx = (x: number) => PAD + ((x - minX) / spanX) * (W - 2 * PAD);
-  const sy = (y: number) => PAD + ((y - minY) / spanY) * (H - 2 * PAD);
+  const sx = (x: number) => M.l + (((x - minX) / spanX) * 0.9 + 0.05) * (W - M.l - M.r);
+  const sy = (y: number) => M.t + (((y - minY) / spanY) * 0.9 + 0.05) * (H - M.t - M.b);
 
   return (
-    <div className="gunbarrel">
-      <h3>Gun-barrel (offset vs TVD)</h3>
-      <svg width={W} height={H} style={{ display: "block" }}>
-        <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="#e5e7eb" />
-        <line x1={PAD} y1={PAD} x2={PAD} y2={H - PAD} stroke="#e5e7eb" />
-        {gb.links.map((l, i) => (
-          <line key={`l${i}`} x1={sx(l.offset_a_ft)} y1={sy(l.tvd_ft)}
-            x2={sx(l.offset_b_ft)} y2={sy(l.tvd_ft)}
-            stroke={colorForBlueox(l.formation)} strokeWidth={1} opacity={0.5} />
-        ))}
-        {gb.points.map((p, i) => (
-          <circle key={`p${i}`} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)} r={3.2}
-            fill={colorForBlueox(p.formation)}
-            stroke={p.category === "pdp" ? "#111827" : "none"} strokeWidth={p.category === "pdp" ? 0.6 : 0}
-            opacity={p.category === "res" ? 0.55 : 1} />
-        ))}
-        <text x={PAD} y={H - 8} fontSize={9} fill="#6b7280">{minX.toFixed(0)} ft</text>
-        <text x={W - PAD} y={H - 8} fontSize={9} fill="#6b7280" textAnchor="end">{maxX.toFixed(0)} ft</text>
-        <text x={4} y={PAD + 4} fontSize={9} fill="#6b7280">{minY.toFixed(0)}</text>
-        <text x={4} y={H - PAD} fontSize={9} fill="#6b7280">{maxY.toFixed(0)}</text>
-      </svg>
-      <div className="legend">
+    <div className="floatwin gb-win" style={{ left: pos.x, top: pos.y }}>
+      <div className="win-head" onMouseDown={onHeadDown}>
+        <span className="win-title">⠿ Gun-barrel — offset vs TVD</span>
+        <span style={{ fontSize: 11, color: "#71717a" }}>{gb.points.length} wells</span>
+      </div>
+      <div className="win-body" ref={bodyRef}>
+        <svg width={W} height={H} style={{ display: "block" }}>
+          <line x1={M.l} y1={H - M.b} x2={W - M.r} y2={H - M.b} stroke="#e5e7eb" />
+          <line x1={M.l} y1={M.t} x2={M.l} y2={H - M.b} stroke="#e5e7eb" />
+          {minX <= 0 && maxX >= 0 && (
+            <line x1={sx(0)} y1={M.t} x2={sx(0)} y2={H - M.b} stroke="#eee" strokeDasharray="2 2" />
+          )}
+          {gb.links.map((l, i) => (
+            <line key={`l${i}`} x1={sx(l.offset_a_ft)} y1={sy(l.tvd_ft)} x2={sx(l.offset_b_ft)} y2={sy(l.tvd_ft)}
+              stroke={colorForBlueox(l.formation)} strokeWidth={1} opacity={0.5} />
+          ))}
+          {gb.points.map((p, i) => (
+            <Marker key={`p${i}`} cat={p.category} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
+              color={colorForBlueox(p.formation)} />
+          ))}
+          <text x={M.l - 5} y={M.t + 6} textAnchor="end" fontSize={9} fill="#71717a">{minY.toFixed(0)}</text>
+          <text x={M.l - 5} y={H - M.b} textAnchor="end" fontSize={9} fill="#71717a">{maxY.toFixed(0)}</text>
+          <text x={W / 2} y={H - 6} textAnchor="middle" fontSize={9} fill="#52525b">offset (ft)</text>
+        </svg>
+      </div>
+      <div className="gb-foot">
+        <span>● PDP</span><span>○ PUD</span><span>△ RES</span><span>· color = bench</span>
         {gb.formations.map((f) => (
           <span key={f.formation}><i className="swatch" style={{ background: f.color }} />{f.formation}</span>
         ))}
