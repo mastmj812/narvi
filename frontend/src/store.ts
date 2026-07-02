@@ -70,6 +70,10 @@ interface State {
   error: string | null;
   scenarios: ScenarioSummary[];
 
+  // map overlays: Texas/NM survey grid (blocks + sections)
+  showBlocks: boolean;
+  showSections: boolean;
+
   setAppMode: (m: AppMode) => void;
   setParcels: (p: ParcelInfo[]) => void;
   selectParcel: (p: ParcelInfo | null) => void;
@@ -90,6 +94,9 @@ interface State {
   save: (name: string) => Promise<void>;
   load: (deal_id: string, scenario_id: string) => Promise<void>;
   remove: (deal_id: string, scenario_id: string) => Promise<void>;
+
+  setShowBlocks: (v: boolean) => void;
+  setShowSections: (v: boolean) => void;
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -112,6 +119,11 @@ export const useStore = create<State>((set, get) => ({
   loading: false,
   error: null,
   scenarios: [],
+
+  // survey grid on by default so it's visible without hunting for a toggle;
+  // both are zoom-gated (blocks z8, sections z11) and lazy-fetched by MapView.
+  showBlocks: true,
+  showSections: true,
 
   setAppMode: (appMode) => {
     set({ appMode });
@@ -243,4 +255,7 @@ export const useStore = create<State>((set, get) => ({
     try { await api.deleteScenario(deal_id, scenario_id); await get().refreshScenarios(); }
     catch (e) { set({ error: String(e) }); }
   },
+
+  setShowBlocks: (showBlocks) => set({ showBlocks }),
+  setShowSections: (showSections) => set({ showSections }),
 }));

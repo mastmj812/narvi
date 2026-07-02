@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, {
   type GeoJSONSource,
+  type LayerSpecification,
   type LngLatBoundsLike,
   type Map as MlMap,
   type StyleSpecification,
@@ -11,6 +12,47 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 import { filterFC, useStore } from "./store";
 import { SCENARIO_LAYERS, SCENARIO_SOURCE } from "./map/scenarioLayers";
+import {
+  BLOCKS_LAYERS, BLOCKS_SOURCE, BLOCKS_URL,
+  SECTIONS_LAYERS, SECTIONS_SOURCE, SECTIONS_URL,
+} from "./map/gridLayers";
+
+// Grid overlays render UNDER the scenario legs so wells always stay on top.
+const GRID_BEFORE_ID = SCENARIO_LAYERS[0].id;
+
+// Lazy-add a survey-grid overlay on first enable, then flip visibility on
+// subsequent toggles. A missing GeoJSON (404) turns the toggle back off rather
+// than throwing — the overlay is optional.
+function syncGridOverlay(
+  map: MlMap,
+  show: boolean,
+  source: string,
+  url: string,
+  layers: readonly LayerSpecification[],
+  onMissing: () => void,
+): void {
+  const layerIds = layers.map((l) => l.id);
+  const setVis = (v: "visible" | "none") => {
+    for (const id of layerIds) {
+      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", v);
+    }
+  };
+  if (!show) { setVis("none"); return; }
+  if (map.getSource(source)) { setVis("visible"); return; }
+  fetch(url)
+    .then((r) => {
+      if (r.status === 404) { onMissing(); return null; }
+      if (!r.ok) throw new Error(`${url} → ${r.status}`);
+      return r.json();
+    })
+    .then((data) => {
+      if (!data || map.getSource(source)) return;
+      map.addSource(source, { type: "geojson", data });
+      const before = map.getLayer(GRID_BEFORE_ID) ? GRID_BEFORE_ID : undefined;
+      for (const layer of layers) map.addLayer(layer, before);
+    })
+    .catch((e) => { console.error(e); });
+}
 
 function parcelOnly(geom: GeoJSON.Geometry): GeoJSON.FeatureCollection {
   return {
@@ -77,6 +119,8 @@ export function MapView() {
   const cats = useStore((s) => s.cats);
   const result = useStore((s) => s.result);
   const parcel = useStore((s) => s.parcel);
+  const showBlocks = useStore((s) => s.showBlocks);
+  const showSections = useStore((s) => s.showSections);
 
   const fc = useMemo<GeoJSON.FeatureCollection>(() => {
     if (appMode === "override") {
@@ -135,6 +179,19 @@ export function MapView() {
     const b = fcBounds(base);
     if (b) map.fitBounds(b, { padding: 90, maxZoom: 14, duration: 600 });
   }, [parcel, result, appMode, ready]);
+
+  // survey-grid overlays (blocks + sections) — lazy-add / toggle visibility
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    syncGridOverlay(mapRef.current, showBlocks, BLOCKS_SOURCE, BLOCKS_URL, BLOCKS_LAYERS,
+      () => useStore.getState().setShowBlocks(false));
+  }, [showBlocks, ready]);
+
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    syncGridOverlay(mapRef.current, showSections, SECTIONS_SOURCE, SECTIONS_URL, SECTIONS_LAYERS,
+      () => useStore.getState().setShowSections(false));
+  }, [showSections, ready]);
 
   return <div ref={containerRef} className="map-root" />;
 }

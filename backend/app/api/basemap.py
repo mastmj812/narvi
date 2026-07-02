@@ -95,3 +95,32 @@ async def head_pmtiles() -> Response:
             "Content-Length": str(path.stat().st_size),
         },
     )
+
+
+def _serve_geojson(path: Path) -> Response:
+    """Serve a vendored survey-grid GeoJSON overlay (blocks / sections).
+
+    404 (not 500) when the file is absent — the overlay is optional and the
+    frontend degrades gracefully by turning its toggle back off. The assets
+    live in anduin's infra/basemap; see app.config for the paths.
+    """
+    if not path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"GeoJSON overlay not found at {path}.",
+        )
+    return FileResponse(
+        path,
+        media_type="application/geo+json",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/blocks_tx_nm.geojson")
+async def serve_blocks() -> Response:
+    return _serve_geojson(settings.blocks_geojson_path)
+
+
+@router.get("/sections_tx_nm.geojson")
+async def serve_sections() -> Response:
+    return _serve_geojson(settings.sections_geojson_path)

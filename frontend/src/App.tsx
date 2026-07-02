@@ -1,6 +1,7 @@
 import { MapView } from "./MapView";
 import { CuratePanel } from "./panels/CuratePanel";
 import { GunBarrel } from "./panels/GunBarrel";
+import { LayerToggle } from "./panels/LayerToggle";
 import { ParamsPanel } from "./panels/ParamsPanel";
 import { ScenarioBar } from "./panels/ScenarioBar";
 import { useStore } from "./store";
@@ -29,6 +30,7 @@ export default function App() {
       </div>
       <div className="map-wrap">
         <MapView />
+        <LayerToggle />
         <GunBarrel />
       </div>
     </div>
