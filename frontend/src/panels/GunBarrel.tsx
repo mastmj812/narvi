@@ -12,19 +12,23 @@ type Pt = GunbarrelData["points"][number];
 // Click culls the well: culled wells disappear everywhere (chart, map, counts)
 // and the TVD axis rescales without them. Restore: PDP via its stick on the
 // basin-wide map layer; anything via "restore all" in the scenario bar.
-// Context (near-parcel offset PDP) renders small + faded.
+// PDP are existing wells shown for spacing reference — they render solid + full
+// opacity in both modes (in override they merge in as reference but stay out of
+// the planned well/leg count). Only a genuinely non-PDP offset point renders
+// small + faded (reserved for a future offset-context source).
 function Marker({ p, cx, cy, color, on, onToggle }: {
   p: Pt; cx: number; cy: number; color: string;
   on: (p: Pt | null, e?: React.MouseEvent) => void;
   onToggle: (p: Pt) => void;
 }) {
-  const r = p.context ? 3 : 4;
+  const faded = p.context && p.category !== "pdp";
+  const r = faded ? 3 : 4;
   const hollow = p.category === "pud" || p.category === "res" || p.category === "generated";
   const paint = {
     fill: hollow ? "#ffffff" : color,
     stroke: hollow ? color : "#3f3f46",
     strokeWidth: hollow ? 1.5 : 0.7,
-    opacity: p.context ? 0.35 : p.category === "res" ? 0.85 : 1,
+    opacity: faded ? 0.35 : p.category === "res" ? 0.85 : 1,
   };
   const h = {
     onMouseEnter: (e: React.MouseEvent) => on(p, e),
@@ -60,7 +64,7 @@ function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
       <table style={{ fontSize: 11, borderCollapse: "collapse" }}>
         <tbody>
           {row("Category", p.category.toUpperCase())}
-          {p.context ? row("Role", "offset context") : null}
+          {p.context && p.category !== "pdp" ? row("Role", "offset context") : null}
           {row("Bench", p.formation)}
           {p.recon_status ? row("Status", p.recon_status.replace(/_/g, " ")) : null}
           {row("TVD", `${Math.round(p.tvd_ft).toLocaleString()} ft`)}
@@ -171,7 +175,7 @@ export function GunBarrel() {
   // context is background
   const keptPts = gb.points.filter((p) => !p.context);
   const keptLinks = gb.links;
-  const hasContext = gb.points.some((p) => p.context);
+  const hasFaded = gb.points.some((p) => p.context && p.category !== "pdp");
 
   return (
     <div className="floatwin gb-win" style={{ left: pos.x, top: pos.y }}>
@@ -221,7 +225,7 @@ export function GunBarrel() {
       </div>
       <div className="gb-foot">
         <span>● PDP</span><span>○ planned (PUD / gen)</span><span>△ RES</span><span>· color = bench</span>
-        {hasContext && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
+        {hasFaded && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
         {hiddenPdp > 0 && (
           <span style={{ color: "#a1a1aa" }}>· {hiddenPdp} PDP hidden — click its stick on the map to restore</span>
         )}
