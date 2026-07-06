@@ -94,12 +94,17 @@ def _required_env(name: str) -> str:
 def _db_kwargs() -> dict[str, str]:
     return {
         "host": _required_env("DB_HOST"),
-        "port": os.getenv("DB_PORT", "5432"),
+        "port": os.getenv("DB_PORT", "6543"),
         "dbname": _required_env("DB_NAME"),
         "user": _required_env("DB_USER"),
         "password": os.getenv("DB_PASSWORD", ""),
         "sslmode": os.getenv("DB_SSLMODE", "prefer"),
         "connect_timeout": os.getenv("DB_CONNECT_TIMEOUT", "30"),
+        # Apply session GUCs as startup options rather than a per-session SET: on the
+        # transaction pooler (6543) a mid-session `SET` doesn't persist across the
+        # multiplexed server connection, so statement_timeout/search_path must ride
+        # the startup packet. Harmless on session mode too.
+        "options": "-c statement_timeout=0 -c search_path=public,extensions",
         "keepalives": "1",
         "keepalives_idle": "30",
         "keepalives_interval": "10",

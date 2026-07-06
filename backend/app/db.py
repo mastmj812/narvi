@@ -11,21 +11,30 @@ from __future__ import annotations
 
 from psycopg_pool import ConnectionPool
 
-from narvi.warehouse import apply_session_settings, db_conninfo
+from narvi.warehouse import db_conninfo
 
 pool: ConnectionPool | None = None
 
 
 def open_pool() -> ConnectionPool:
     """Create (first call) and open the shared pool. Raises RuntimeError if the
-    DB_* env keys are missing — callers decide whether that is fatal."""
+    DB_* env keys are missing — callers decide whether that is fatal.
+
+    Sized for the Supavisor transaction pooler (DB_PORT=6543): prepared statements
+    are disabled (transaction mode can't reuse them across the multiplexed server
+    connection) and session GUCs ride the conninfo startup `options` (see
+    warehouse._db_kwargs), so no per-session `configure` hook is needed. min_size=0
+    plus max_idle/max_lifetime keep narvi from stranding idle server sessions — the
+    failure mode that exhausted the 15-client session-mode cap on repeated reloads."""
     global pool
     if pool is None:
         pool = ConnectionPool(
             conninfo=db_conninfo(),
-            min_size=1,
+            kwargs={"prepare_threshold": None},
+            min_size=0,
             max_size=6,
-            configure=apply_session_settings,
+            max_idle=120.0,
+            max_lifetime=600.0,
             open=False,
             name="narvi-warehouse",
         )
