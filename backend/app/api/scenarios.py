@@ -45,6 +45,12 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     p = replace(p, deal_id=req.deal_id, scenario_id=req.scenario_id)
+    # Bake culls into the saved plan: culled wells are dropped from the persisted
+    # rows entirely (not just hidden) so the narvi hand-off surface the forecasters
+    # read never carries a well the planner removed. Culling keys on well_name.
+    culled = set(req.culled_wells)
+    if culled:
+        wells = [w for w in wells if w.well_name not in culled]
     n = persist.save_scenario(
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
         summary={"note": summary, "warehouse_notes": notes}, name=req.name)

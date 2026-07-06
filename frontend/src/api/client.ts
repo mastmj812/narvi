@@ -147,8 +147,11 @@ export const api = {
   listScenarios: (deal_id?: string) =>
     jget<ScenarioSummary[]>(`/api/scenarios${deal_id ? `?deal_id=${encodeURIComponent(deal_id)}` : ""}`),
 
-  saveScenario: (deal_id: string, scenario_id: string, name: string, generate: GenerateRequest) =>
-    jpost<{ saved_wells: number }>("/api/scenarios", { deal_id, scenario_id, name, generate }),
+  // culled_wells are baked out of the persisted plan server-side (not just hidden)
+  saveScenario: (deal_id: string, scenario_id: string, name: string,
+    generate: GenerateRequest, culled_wells: string[] = []) =>
+    jpost<{ saved_wells: number }>("/api/scenarios",
+      { deal_id, scenario_id, name, generate, culled_wells }),
 
   saveCurateScenario: (
     deal_id: string, scenario_id: string, name: string, parcel: GeoJSON.Geometry,

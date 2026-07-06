@@ -334,7 +334,7 @@ export const useStore = create<State>((set, get) => ({
         const req = s.buildRequest();
         if (!req) return;
         await api.saveScenario(deal, `${s.params.well_type}_${s.params.objective}_${slug}`,
-          name || s.parcel.label, req);
+          name || s.parcel.label, req, s.culledWells);
       }
       await get().refreshScenarios();
     } catch (e) { set({ error: String(e) }); }

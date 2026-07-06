@@ -115,6 +115,9 @@ class SaveScenarioRequest(BaseModel):
     scenario_id: str
     name: str | None = None
     generate: GenerateRequest                  # regenerated server-side, then persisted
+    culled_wells: list[str] = []               # per-well culls (well_name) baked out of
+                                               # the persisted plan — the forecaster
+                                               # hand-off must not carry culled wells
 
 
 class SaveCurateRequest(BaseModel):
