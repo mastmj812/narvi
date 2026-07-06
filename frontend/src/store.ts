@@ -369,8 +369,24 @@ export const useStore = create<State>((set, get) => ({
         });
         return;
       }
+      // Restore the saved parcel here too: the gun-barrel merges the store's
+      // inventory PDP as offset context, so inventory left over from a
+      // previously selected parcel would overlay foreign wells in the wrong
+      // offset frame (its offsets are relative to THAT parcel's centroid).
+      // Refetch only when the parcel actually changes — inventory queries are
+      // the expensive part of a load.
+      const restored = r.parcel;
+      // deal_id derives from the parcel label on save, so it identifies the
+      // parcel whether the current one carries the shapefile name or the slug
+      const cur = get().parcel;
+      const sameParcel = restored != null && cur != null && dealIdFor(cur.label) === deal_id;
+      const parcels = restored && !sameParcel && !get().parcels.some((p) => p.label === restored.label)
+        ? [...get().parcels, restored] : get().parcels;
       set({
         appMode: "override",
+        parcels,
+        parcel: sameParcel ? cur : restored ?? cur,
+        ...(sameParcel ? {} : { inventory: null, benchTvd: {} }),
         culledWells: [],
         loaded: { deal_id, name: meta?.name ?? null },
         result: {
@@ -380,6 +396,9 @@ export const useStore = create<State>((set, get) => ({
         },
         loading: false,
       });
+      // background refetch: the persisted wells render immediately; PDP context
+      // fades in when the inventory for the restored parcel arrives
+      if (restored && (!sameParcel || !get().inventory)) void get().fetchInventory();
     } catch (e) { set({ error: String(e), loading: false }); }
   },
 
