@@ -234,7 +234,7 @@ def load_scenario(
             SELECT deal_id, scenario_id, name, well_type, objective, spacing_ft,
                    setback_ft, setback_ns_ft, setback_ew_ft, azimuth_deg,
                    min_lateral_ft, total_wells, total_legs, total_completed_ft,
-                   total_drilled_ft, summary, created_at, updated_at
+                   total_drilled_ft, params, summary, created_at, updated_at
             FROM narvi.scenario WHERE deal_id = %s AND scenario_id = %s
             """,
             (deal_id, scenario_id),

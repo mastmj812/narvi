@@ -93,6 +93,15 @@ export interface CurateSummary {
   culled_wells: string[];
 }
 
+// summary stamped on an override save — the note plus the exact GenerateRequest
+// (minus parcel, which reloads from the stored AOI) so a loaded scenario
+// restores as an editable recipe, not a frozen snapshot
+export interface OverrideSummary {
+  note?: string;
+  warehouse_notes?: string[];
+  generate?: Omit<GenerateRequest, "parcel">;
+}
+
 export interface ScenarioSummary {
   deal_id: string;
   scenario_id: string;
@@ -165,7 +174,12 @@ export const api = {
 
   loadScenario: (deal_id: string, scenario_id: string) =>
     jget<{
-      header: Record<string, unknown> & { summary?: CurateSummary | Record<string, unknown> | null };
+      header: Record<string, unknown> & {
+        summary?: CurateSummary | OverrideSummary | Record<string, unknown> | null;
+        params?: Record<string, unknown> | null;  // persisted ScenarioParams — the
+                                                  // restore fallback for saves that
+                                                  // predate summary.generate
+      };
       geojson: GeoJSON.FeatureCollection; gunbarrel: GunbarrelData;
       parcel: ParcelInfo | null;          // rebuilt from the stored AOI (curate restore)
     }>(

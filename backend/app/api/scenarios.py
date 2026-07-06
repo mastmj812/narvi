@@ -53,7 +53,12 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
         wells = [w for w in wells if w.well_name not in culled]
     n = persist.save_scenario(
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
-        summary={"note": summary, "warehouse_notes": notes}, name=req.name)
+        # `generate` = the exact request recipe (minus the parcel, which reloads
+        # from the stored AOI) so the client can restore an EDITABLE override
+        # state on load — params, mode, and per-bench zones included.
+        summary={"note": summary, "warehouse_notes": notes,
+                 "generate": req.generate.model_dump(mode="json", exclude={"parcel"})},
+        name=req.name)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 

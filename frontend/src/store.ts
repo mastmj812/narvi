@@ -9,6 +9,7 @@ import {
   type BenchInfo,
   type InventoryResponse,
   type Mode,
+  type OverrideSummary,
   type Params,
   type ParcelInfo,
   type ScenarioSummary,
@@ -28,6 +29,24 @@ const DEFAULT_PARAMS: Params = {
 
 export function dealIdFor(label: string): string {
   return label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "deal";
+}
+
+// Params recoverable from a persisted ScenarioParams jsonb — the restore source
+// for override saves that predate summary.generate (wine-rack zones weren't
+// kept back then, so those restore single-bench fields only).
+const SAVED_PARAM_KEYS = [
+  "spacing_ft", "setback_ft", "setback_ns_ft", "setback_ew_ft", "formation",
+  "target_tvd_ft", "well_type", "objective", "drill_from", "anchor",
+  "azimuth_deg", "min_lateral_ft",
+] as const;
+
+function paramsFromScenario(sp: Record<string, unknown> | null | undefined): Partial<Params> {
+  if (!sp) return {};
+  const out: Record<string, unknown> = {};
+  for (const k of SAVED_PARAM_KEYS) {
+    if (sp[k] != null) out[k] = sp[k];
+  }
+  return out as Partial<Params>;
 }
 
 // A leg is shown if its bench is kept AND its category is active. Non-leg
@@ -132,7 +151,10 @@ interface State {
   selectParcel: (p: ParcelInfo | null) => void;
   loadSynthetic: () => Promise<void>;
   uploadParcels: (file: File) => Promise<void>;
-  fetchInventory: () => Promise<void>;
+  // seed: false keeps the current keptBenches / wine-rack picks / single-bench
+  // params instead of reseeding them from the discovered benches (used when
+  // restoring a saved scenario — the recipe must survive the inventory arriving)
+  fetchInventory: (opts?: { seed?: boolean }) => Promise<void>;
   toggleBench: (code: string) => void;
   toggleCat: (c: Category) => void;
   toggleCull: (wellName: string) => void;
@@ -190,22 +212,21 @@ export const useStore = create<State>((set, get) => ({
   showPdpWells: true,
   gbFlip: false,
 
-  setAppMode: (appMode) => {
-    set({ appMode });
-    if (appMode === "curate" && get().parcel && !get().inventory) void get().fetchInventory();
-  },
+  setAppMode: (appMode) => set({ appMode }),
   setParcels: (parcels) => set({ parcels }),
 
+  // Picking a parcel (upload / dropdown / synthetic) NEVER auto-queries the
+  // warehouse — a multi-polygon upload would otherwise fire an expensive
+  // inventory fetch for whichever DSU happens to be first. The user starts the
+  // fetch explicitly via the "Load inventory" button (fetchInventory).
   selectParcel: (parcel) => {
     set({ parcel, result: null, inventory: null, culledWells: [], benchTvd: {}, loaded: null, error: null });
-    if (parcel) void get().fetchInventory();   // benches feed BOTH curate + override
   },
 
   loadSynthetic: async () => {
     try {
       const p = await api.syntheticParcel();
       set({ parcels: [p], parcel: p, result: null, inventory: null, culledWells: [], benchTvd: {}, loaded: null, error: null });
-      await get().fetchInventory();
     } catch (e) { set({ error: String(e) }); }
   },
 
@@ -213,16 +234,16 @@ export const useStore = create<State>((set, get) => ({
     try {
       const { parcels } = await api.uploadParcels(file);
       set({ parcels, parcel: parcels[0] ?? null, result: null, inventory: null, culledWells: [], benchTvd: {}, loaded: null, error: null });
-      if (parcels[0]) await get().fetchInventory();
     } catch (e) { set({ error: String(e) }); }
   },
 
   // Discover the parcel's actual benches (basin-correct — Delaware OR Midland)
   // and seed both the curate keptBenches and the override wine-rack + single
   // defaults from them, so nothing is hardcoded to one basin.
-  fetchInventory: async () => {
+  fetchInventory: async (opts) => {
     const s = get();
     if (!s.parcel) return;
+    const seed = opts?.seed ?? true;
     set({ loading: true, error: null });
     try {
       const inv = await api.inventory(s.parcel.geojson);
@@ -234,12 +255,14 @@ export const useStore = create<State>((set, get) => ({
         ?? inv.benches.find((b) => b.median_tvd_ft != null);
       set({
         inventory: inv, benches: inv.benches, devBenches: inv.dev_benches,
-        keptBenches: inv.benches.map((b) => b.formation),
-        winerackFormations: sourceable.map((b) => b.formation),
-        params: shallow
-          ? { ...get().params, formation: shallow.formation,
-              target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }
-          : get().params,
+        ...(seed ? {
+          keptBenches: inv.benches.map((b) => b.formation),
+          winerackFormations: sourceable.map((b) => b.formation),
+          params: shallow
+            ? { ...get().params, formation: shallow.formation,
+                target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }
+            : get().params,
+        } : {}),
         loading: false,
       });
     } catch (e) { set({ error: String(e), loading: false }); }
@@ -382,11 +405,33 @@ export const useStore = create<State>((set, get) => ({
       const sameParcel = restored != null && cur != null && dealIdFor(cur.label) === deal_id;
       const parcels = restored && !sameParcel && !get().parcels.some((p) => p.label === restored.label)
         ? [...get().parcels, restored] : get().parcels;
+      // Restore the generator RECIPE so the loaded scenario is re-editable
+      // (tweak one param -> Generate reproduces + varies the saved plan) instead
+      // of a frozen snapshot: new saves carry the exact GenerateRequest in
+      // summary.generate; older saves fall back to the persisted ScenarioParams
+      // (single-bench fields only — zones weren't kept back then).
+      const gen = (summary as OverrideSummary | null | undefined)?.generate;
+      const zones = gen?.zones ?? [];
+      const params: Params = gen
+        ? { ...get().params, ...gen.params }
+        : { ...get().params, ...paramsFromScenario(r.header?.params) };
       set({
         appMode: "override",
         parcels,
         parcel: sameParcel ? cur : restored ?? cur,
-        ...(sameParcel ? {} : { inventory: null, benchTvd: {} }),
+        ...(sameParcel ? {} : { inventory: null }),
+        params,
+        mode: gen?.mode ?? (zones.length ? "winerack" : "single"),
+        sourceAzimuth: gen?.source_azimuth ?? get().sourceAzimuth,
+        // zones pin the exact per-bench TVD/spacing that produced the saved plan
+        // (hard overrides — immune to warehouse drift); without a recipe, keep
+        // the old behavior of clearing structural overrides on a parcel change
+        ...(zones.length ? {
+          winerackFormations: zones.map((z) => z.formation),
+          benchTvd: Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft])),
+          benchSpacing: Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
+            .map((z) => [z.formation, z.spacing_ft as number])),
+        } : (sameParcel ? {} : { benchTvd: {} })),
         culledWells: [],
         loaded: { deal_id, name: meta?.name ?? null },
         result: {
@@ -397,8 +442,9 @@ export const useStore = create<State>((set, get) => ({
         loading: false,
       });
       // background refetch: the persisted wells render immediately; PDP context
-      // fades in when the inventory for the restored parcel arrives
-      if (restored && (!sameParcel || !get().inventory)) void get().fetchInventory();
+      // fades in when the inventory for the restored parcel arrives. seed:false
+      // so the arriving benches don't clobber the restored recipe.
+      if (restored && (!sameParcel || !get().inventory)) void get().fetchInventory({ seed: false });
     } catch (e) { set({ error: String(e), loading: false }); }
   },
 
