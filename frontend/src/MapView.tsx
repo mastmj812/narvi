@@ -10,7 +10,7 @@ import { Protocol } from "pmtiles";
 import layers from "protomaps-themes-base";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import { cullFC, filterFC, useStore } from "./store";
+import { composeFC, useStore } from "./store";
 import { LEG_LAYER_IDS, SCENARIO_LAYERS, SCENARIO_SOURCE } from "./map/scenarioLayers";
 import {
   BLOCKS_LAYERS, BLOCKS_SOURCE, BLOCKS_URL,
@@ -118,9 +118,8 @@ export function MapView() {
   const mapRef = useRef<MlMap | null>(null);
   const [ready, setReady] = useState(false);
 
-  const appMode = useStore((s) => s.appMode);
   const inventory = useStore((s) => s.inventory);
-  const keptBenches = useStore((s) => s.keptBenches);
+  const benchSource = useStore((s) => s.benchSource);
   const cats = useStore((s) => s.cats);
   const culledWells = useStore((s) => s.culledWells);
   const result = useStore((s) => s.result);
@@ -130,13 +129,10 @@ export function MapView() {
   const showPdpWells = useStore((s) => s.showPdpWells);
 
   const fc = useMemo<GeoJSON.FeatureCollection>(() => {
-    if (appMode === "override") {
-      if (result) return cullFC(result.geojson, culledWells);
-      return parcel ? parcelOnly(parcel.geojson) : EMPTY_FC;
-    }
-    if (inventory) return filterFC(inventory.geojson, keptBenches, cats, culledWells);
+    const composed = composeFC({ inventory, result, benchSource, cats, culledWells });
+    if (composed) return composed;
     return parcel ? parcelOnly(parcel.geojson) : EMPTY_FC;
-  }, [appMode, inventory, keptBenches, cats, culledWells, result, parcel]);
+  }, [inventory, result, benchSource, cats, culledWells, parcel]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -237,12 +233,10 @@ export function MapView() {
     if (!ready) return;
     const map = mapRef.current;
     if (!map) return;
-    const base = parcel
-      ? parcelOnly(parcel.geojson)
-      : appMode === "override" ? (result?.geojson ?? EMPTY_FC) : EMPTY_FC;
+    const base = parcel ? parcelOnly(parcel.geojson) : (result?.geojson ?? EMPTY_FC);
     const b = fcBounds(base);
     if (b) map.fitBounds(b, { padding: 90, maxZoom: 14, duration: 600 });
-  }, [parcel, result, appMode, ready]);
+  }, [parcel, result, ready]);
 
   // survey-grid overlays (blocks + sections) — lazy-add / toggle visibility
   useEffect(() => {

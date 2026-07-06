@@ -3,7 +3,7 @@ import { exportFC, useStore } from "../store";
 import { exportGeoJSON, exportWellCSV } from "../export";
 
 export function ScenarioBar() {
-  const { scenarios, parcel, result, appMode, inventory, culledWells, loaded,
+  const { scenarios, parcel, result, inventory, culledWells, loaded,
     refreshScenarios, save, load, remove, toggleCull, restoreAllCulled } = useStore();
   const [name, setName] = useState("");
 
@@ -16,11 +16,11 @@ export function ScenarioBar() {
 
   useEffect(() => { refreshScenarios(); }, [refreshScenarios]);
 
-  // saving needs a parcel (curate re-derives inventory / override regenerates from it);
-  // export only needs the current FC, so it also works on a loaded scenario (no parcel).
-  const hasFC = appMode === "override" ? !!result : !!inventory;
-  const canSave = !!parcel && hasFC;
-  const canExport = hasFC;
+  // saving needs a parcel + inventory (the composed save re-derives the kept
+  // Novi baseline and regenerates server-side); export only needs the current
+  // FC, so it also works on a loaded scenario.
+  const canSave = !!parcel && !!inventory;
+  const canExport = !!inventory || !!result;
 
   // export the current (post-cull, post-filter, context-stripped) inventory FC as
   // GeoJSON or CSV. filename = the scenario name (typed name > loaded scenario >

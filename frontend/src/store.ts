@@ -1,21 +1,25 @@
 import { create } from "zustand";
 import {
   api,
-  WAREHOUSE_STACK,
   type Category,
+  type ComposedSummary,
   type CurateSummary,
   type GenerateRequest,
   type GenerateResponse,
   type BenchInfo,
+  type GunbarrelData,
   type InventoryResponse,
-  type Mode,
   type OverrideSummary,
   type Params,
   type ParcelInfo,
   type ScenarioSummary,
 } from "./api/client";
 
-export type AppMode = "curate" | "override";
+// Per-bench inventory source — the core of the unified (no curate/override
+// toggle) model: for each bench the user either adopts the Novi baseline,
+// generates their own wells, or drops it. The working set = the union across
+// benches, plus PDP as reference.
+export type BenchSource = "novi" | "generate" | "off";
 
 const DEFAULT_PARAMS: Params = {
   // 330 ft setback is the typical section-line legal setback (default). N/S == E/W
@@ -49,88 +53,201 @@ function paramsFromScenario(sp: Record<string, unknown> | null | undefined): Par
   return out as Partial<Params>;
 }
 
-// A leg is shown if its bench is kept AND its category is active. Non-leg
-// features (parcel/window/turn) and `generated` legs always pass.
-export function catActive(cats: Record<Category, boolean>, category: string): boolean {
-  if (category === "pdp" || category === "pud" || category === "res") return cats[category];
-  return true;
+// One row per bench in the unified bench table: the union of the unit's overlap
+// inventory (Novi counts) and the area-developable benches (generation TVD /
+// spacing control). Overlap counts are the unit's truth; the dev median TVD is
+// preferred for generation (producer-sourced — overlap medians can carry Novi
+// placeholder TVDs, e.g. WDFD RES ~19k).
+export interface BenchRow {
+  formation: string;
+  median_tvd_ft: number | null;
+  n_pdp: number;
+  n_pud: number;
+  n_res: number;
+  suggested_spacing_ft: number | null;
+  hasNovi: boolean;               // any overlapping PUD/RES to adopt
 }
 
-export function filterFC(
-  fc: GeoJSON.FeatureCollection, kept: string[], cats: Record<Category, boolean>,
-  culled: string[] = [],
-): GeoJSON.FeatureCollection {
-  const keptSet = new Set(kept);
-  const culledSet = new Set(culled);
-  return {
-    type: "FeatureCollection",
-    features: fc.features.filter((f) => {
-      const p = f.properties ?? {};
-      // culling keys on well_name -> drops both legs of a U-turn AND its turn arc
-      if (culledSet.has(p.well_name)) return false;
-      if (p.kind !== "leg") return true;
-      // near-parcel PDP context: not part of the unit, so it bypasses the bench
-      // filter — the PDP category toggle (or a cull, above) hides it
-      if (p.context) return cats.pdp;
-      return keptSet.has(p.formation) && catActive(cats, p.category);
-    }),
-  };
-}
-
-// Cull-only filter (override mode: the generated plan isn't bench/cat filtered).
-export function cullFC(
-  fc: GeoJSON.FeatureCollection, culled: string[],
-): GeoJSON.FeatureCollection {
-  if (culled.length === 0) return fc;
-  const culledSet = new Set(culled);
-  return {
-    type: "FeatureCollection",
-    features: fc.features.filter((f) => !culledSet.has((f.properties ?? {}).well_name)),
-  };
-}
-
-// The FC currently on the map / for export: inventory (curate — bench + category
-// + cull filtered) or the generated result (override — cull filtered). null when
-// nothing is loaded yet (parcel-only outline is handled by the caller).
-export function currentFC(s: State): GeoJSON.FeatureCollection | null {
-  if (s.appMode === "override") {
-    return s.result ? cullFC(s.result.geojson, s.culledWells) : null;
+export function benchRows(s: Pick<State, "benches" | "devBenches">): BenchRow[] {
+  const map = new Map<string, BenchRow>();
+  for (const b of s.devBenches) {
+    map.set(b.formation, {
+      formation: b.formation, median_tvd_ft: b.median_tvd_ft,
+      n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
+      suggested_spacing_ft: b.suggested_spacing_ft, hasNovi: false,
+    });
   }
-  return s.inventory ? filterFC(s.inventory.geojson, s.keptBenches, s.cats, s.culledWells) : null;
+  for (const b of s.benches) {
+    const dev = map.get(b.formation);
+    map.set(b.formation, {
+      formation: b.formation,
+      median_tvd_ft: dev?.median_tvd_ft ?? b.median_tvd_ft,
+      n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
+      suggested_spacing_ft: dev?.suggested_spacing_ft ?? b.suggested_spacing_ft,
+      hasNovi: b.n_pud + b.n_res > 0,
+    });
+  }
+  return [...map.values()].sort(
+    (a, b) => (a.median_tvd_ft ?? Infinity) - (b.median_tvd_ft ?? Infinity));
 }
 
-// The FC for EXPORT: currentFC minus context wells (offset background is for the
-// eyes, never for the GeoJSON/CSV handoff).
+// Default sources on inventory load: adopt Novi wherever the unit has PUD/RES;
+// everything else (dev-only or PDP-only benches) starts off.
+function seedBenchSources(inv: InventoryResponse): Record<string, BenchSource> {
+  const src: Record<string, BenchSource> = {};
+  for (const b of inv.dev_benches) src[b.formation] = "off";
+  for (const b of inv.benches) src[b.formation] = b.n_pud + b.n_res > 0 ? "novi" : "off";
+  return src;
+}
+
+// The generator zones implied by the bench table: every generate-sourced bench,
+// TVD/spacing resolved hard-override -> bench control -> deal-level default.
+export function zonesForGenerate(
+  s: Pick<State, "benches" | "devBenches" | "benchSource" | "benchTvd" | "benchSpacing" | "params">,
+): { formation: string; target_tvd_ft: number; spacing_ft: number }[] {
+  return benchRows(s)
+    .filter((r) => s.benchSource[r.formation] === "generate")
+    .map((r) => ({
+      formation: r.formation,
+      target_tvd_ft: s.benchTvd[r.formation] ?? r.median_tvd_ft ?? s.params.target_tvd_ft,
+      spacing_ft: s.benchSpacing[r.formation] ?? r.suggested_spacing_ft ?? s.params.spacing_ft,
+    }));
+}
+
+export function buildRequestFrom(
+  s: Pick<State, "parcel" | "params" | "sourceAzimuth" | "benches" | "devBenches"
+    | "benchSource" | "benchTvd" | "benchSpacing">,
+): GenerateRequest | null {
+  if (!s.parcel) return null;
+  const zones = zonesForGenerate(s);
+  if (zones.length === 0) return null;
+  return {
+    parcel: s.parcel.geojson, params: s.params, mode: "winerack",
+    zones, source_azimuth: s.sourceAzimuth, buffer_ft: 5280,
+  };
+}
+
+// True when generate-sourced benches exist but the on-screen result doesn't
+// match the current recipe (params/zone changed, or nothing generated yet) —
+// the working set is missing/stale until the user regenerates.
+export function genStale(s: State): boolean {
+  const req = buildRequestFrom(s);
+  if (!req) return false;
+  return !s.result || s.lastGenKey !== JSON.stringify(req);
+}
+
+type ComposeSlice = Pick<State, "inventory" | "result" | "benchSource" | "cats" | "culledWells">;
+
+// The composed working-set FeatureCollection: Novi-sourced benches' PUD/RES from
+// the inventory + generate-sourced benches' wells from the result + PDP always
+// (reality/reference, independent of bench source), culls across everything.
+export function composeFC(s: ComposeSlice): GeoJSON.FeatureCollection | null {
+  const inv = s.inventory?.geojson ?? null;
+  const gen = s.result?.geojson ?? null;
+  if (!inv && !gen) return null;
+  const culled = new Set(s.culledWells);
+  const features: GeoJSON.Feature[] = [];
+  if (inv) {
+    for (const f of inv.features) {
+      const p = f.properties ?? {};
+      if (p.kind === "leg" || p.kind === "turn") {
+        if (culled.has(p.well_name)) continue;
+        if (p.context || p.category === "pdp") {
+          if (s.cats.pdp) features.push(f);
+        } else if (p.kind === "turn") {
+          if (s.benchSource[p.formation] === "novi") features.push(f);
+        } else if ((p.category === "pud" || p.category === "res")
+            && s.benchSource[p.formation] === "novi" && s.cats[p.category as Category]) {
+          features.push(f);
+        }
+      } else if (p.kind !== "window") {
+        features.push(f);         // parcel etc.
+      }
+    }
+  }
+  if (gen) {
+    for (const f of gen.features) {
+      const p = f.properties ?? {};
+      if (p.kind === "parcel") { if (!inv) features.push(f); continue; }
+      if (p.kind === "window") { features.push(f); continue; }
+      if (culled.has(p.well_name)) continue;
+      if (s.benchSource[p.formation] === "generate") features.push(f);
+    }
+  }
+  return { type: "FeatureCollection", features };
+}
+
+// The composed gun-barrel: same source rules as composeFC. PDP points carry
+// context=true so the chart's plan census excludes them (they render solid and
+// full-size — reference, not dimmed).
+export function composeGunbarrel(s: ComposeSlice): GunbarrelData | null {
+  const inv = s.inventory?.gunbarrel ?? null;
+  const gen = s.result?.gunbarrel ?? null;
+  if (!inv && !gen) return null;
+  const culled = new Set(s.culledWells);
+  const points: GunbarrelData["points"] = [];
+  const links: GunbarrelData["links"] = [];
+  if (inv) {
+    for (const p of inv.points) {
+      if (culled.has(p.well_name)) continue;
+      if (p.category === "pdp" || p.context) {
+        if (s.cats.pdp) points.push({ ...p, context: true });
+      } else if ((p.category === "pud" || p.category === "res")
+          && s.benchSource[p.formation] === "novi" && s.cats[p.category as Category]) {
+        points.push(p);
+      }
+    }
+    for (const l of inv.links) {
+      if (!culled.has(l.well_name) && s.benchSource[l.formation] === "novi") links.push(l);
+    }
+  }
+  if (gen) {
+    for (const p of gen.points) {
+      if (culled.has(p.well_name)) continue;
+      if (p.category !== "pdp" && s.benchSource[p.formation] === "generate") points.push(p);
+    }
+    for (const l of gen.links) {
+      if (!culled.has(l.well_name) && s.benchSource[l.formation] === "generate") links.push(l);
+    }
+  }
+  if (points.length === 0) return null;
+  return {
+    formations: [],               // legend rebuilt client-side (colorForBlueox)
+    points, links,
+    azimuth_deg: gen?.azimuth_deg ?? inv?.azimuth_deg ?? null,
+  };
+}
+
+// The FC for EXPORT: composed working set minus context wells (offset background
+// is for the eyes, never for the GeoJSON/CSV handoff).
 export function exportFC(s: State): GeoJSON.FeatureCollection | null {
-  const fc = currentFC(s);
+  const fc = composeFC(s);
   if (!fc) return null;
   return { ...fc, features: fc.features.filter((f) => !(f.properties?.context)) };
 }
 
 interface State {
-  appMode: AppMode;
   parcels: ParcelInfo[];
   parcel: ParcelInfo | null;
 
-  // curate
+  // inventory (per-deal, fetched explicitly via "Load inventory")
   inventory: InventoryResponse | null;
-  benches: BenchInfo[];            // overlap inventory (curate menu)
-  devBenches: BenchInfo[];         // area-developable benches (override menu)
-  keptBenches: string[];
+  benches: BenchInfo[];            // overlap inventory (unit truth: Novi counts)
+  devBenches: BenchInfo[];         // area-developable benches (generation control)
+  benchSource: Record<string, BenchSource>;
   cats: Record<Category, boolean>;
   culledWells: string[];           // per-well cull (by well_name) — hidden from map/export
 
-  // override (generator)
-  mode: Mode;
+  // generator (deal-level params; per-bench TVD/spacing live on the bench rows)
   params: Params;
   sourceAzimuth: boolean;
-  winerackFormations: string[];
   benchSpacing: Record<string, number>;   // per-bench leg-to-leg override (formation -> ft)
   // per-bench hard TVD override (formation -> ft) for generated locations —
   // trumps the warehouse median (novi_intel WCB_2 TVDs can run deep / mis-tagged;
   // the geologist's number wins). Structural, so it resets on parcel change.
   benchTvd: Record<string, number>;
   result: GenerateResponse | null;
+  lastGenKey: string | null;       // JSON of the request behind `result` (staleness)
   loaded: { deal_id: string; name: string | null } | null;  // identity of a loaded scenario (export naming when no parcel)
 
   loading: boolean;
@@ -146,24 +263,21 @@ interface State {
   // prefer the section laid out the other way round)
   gbFlip: boolean;
 
-  setAppMode: (m: AppMode) => void;
   setParcels: (p: ParcelInfo[]) => void;
   selectParcel: (p: ParcelInfo | null) => void;
   loadSynthetic: () => Promise<void>;
   uploadParcels: (file: File) => Promise<void>;
-  // seed: false keeps the current keptBenches / wine-rack picks / single-bench
-  // params instead of reseeding them from the discovered benches (used when
-  // restoring a saved scenario — the recipe must survive the inventory arriving)
+  // seed: false keeps the current bench sources / params instead of reseeding
+  // them from the discovered benches (used when restoring a saved scenario —
+  // the recipe must survive the inventory arriving)
   fetchInventory: (opts?: { seed?: boolean }) => Promise<void>;
-  toggleBench: (code: string) => void;
+  setBenchSource: (formation: string, src: BenchSource) => void;
   toggleCat: (c: Category) => void;
   toggleCull: (wellName: string) => void;
   restoreAllCulled: () => void;
 
-  setMode: (m: Mode) => void;
   setParam: <K extends keyof Params>(k: K, v: Params[K]) => void;
   setSourceAzimuth: (v: boolean) => void;
-  toggleWinerackFormation: (f: string) => void;
   setBenchSpacing: (f: string, v: number) => void;
   setBenchTvd: (f: string, v: number | null) => void;   // null/NaN clears the override
   buildRequest: () => GenerateRequest | null;
@@ -180,25 +294,31 @@ interface State {
   toggleGbFlip: () => void;
 }
 
+// state cleared whenever the working parcel changes
+const PARCEL_RESET = {
+  result: null, inventory: null, benches: [] as BenchInfo[], devBenches: [] as BenchInfo[],
+  benchSource: {} as Record<string, BenchSource>, benchSpacing: {} as Record<string, number>,
+  benchTvd: {} as Record<string, number>, culledWells: [] as string[],
+  lastGenKey: null, loaded: null, error: null,
+};
+
 export const useStore = create<State>((set, get) => ({
-  appMode: "curate",
   parcels: [],
   parcel: null,
 
   inventory: null,
   benches: [],
   devBenches: [],
-  keptBenches: [],
+  benchSource: {},
   cats: { pdp: true, pud: true, res: false },
   culledWells: [],
 
-  mode: "single",
   params: { ...DEFAULT_PARAMS },
   sourceAzimuth: true,
-  winerackFormations: [...WAREHOUSE_STACK],
   benchSpacing: {},
   benchTvd: {},
   result: null,
+  lastGenKey: null,
   loaded: null,
 
   loading: false,
@@ -212,34 +332,31 @@ export const useStore = create<State>((set, get) => ({
   showPdpWells: true,
   gbFlip: false,
 
-  setAppMode: (appMode) => set({ appMode }),
   setParcels: (parcels) => set({ parcels }),
 
   // Picking a parcel (upload / dropdown / synthetic) NEVER auto-queries the
   // warehouse — a multi-polygon upload would otherwise fire an expensive
   // inventory fetch for whichever DSU happens to be first. The user starts the
   // fetch explicitly via the "Load inventory" button (fetchInventory).
-  selectParcel: (parcel) => {
-    set({ parcel, result: null, inventory: null, culledWells: [], benchTvd: {}, loaded: null, error: null });
-  },
+  selectParcel: (parcel) => set({ parcel, ...PARCEL_RESET }),
 
   loadSynthetic: async () => {
     try {
       const p = await api.syntheticParcel();
-      set({ parcels: [p], parcel: p, result: null, inventory: null, culledWells: [], benchTvd: {}, loaded: null, error: null });
+      set({ parcels: [p], parcel: p, ...PARCEL_RESET });
     } catch (e) { set({ error: String(e) }); }
   },
 
   uploadParcels: async (file) => {
     try {
       const { parcels } = await api.uploadParcels(file);
-      set({ parcels, parcel: parcels[0] ?? null, result: null, inventory: null, culledWells: [], benchTvd: {}, loaded: null, error: null });
+      set({ parcels, parcel: parcels[0] ?? null, ...PARCEL_RESET });
     } catch (e) { set({ error: String(e) }); }
   },
 
   // Discover the parcel's actual benches (basin-correct — Delaware OR Midland)
-  // and seed both the curate keptBenches and the override wine-rack + single
-  // defaults from them, so nothing is hardcoded to one basin.
+  // and seed the bench sources + the single-bench generator defaults from them,
+  // so nothing is hardcoded to one basin.
   fetchInventory: async (opts) => {
     const s = get();
     if (!s.parcel) return;
@@ -247,17 +364,13 @@ export const useStore = create<State>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const inv = await api.inventory(s.parcel.geojson);
-      // curate menu = what overlaps the unit; override menu = area-developable
-      // benches with producing TVD control (>=3 PDP), so e.g. WCA shows even with
-      // no well crossing the parcel.
       const sourceable = inv.dev_benches.filter((b) => b.n_pdp >= 3);
       const shallow = sourceable.find((b) => b.median_tvd_ft != null)
         ?? inv.benches.find((b) => b.median_tvd_ft != null);
       set({
         inventory: inv, benches: inv.benches, devBenches: inv.dev_benches,
         ...(seed ? {
-          keptBenches: inv.benches.map((b) => b.formation),
-          winerackFormations: sourceable.map((b) => b.formation),
+          benchSource: seedBenchSources(inv),
           params: shallow
             ? { ...get().params, formation: shallow.formation,
                 target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }
@@ -268,12 +381,8 @@ export const useStore = create<State>((set, get) => ({
     } catch (e) { set({ error: String(e), loading: false }); }
   },
 
-  toggleBench: (code) =>
-    set((s) => ({
-      keptBenches: s.keptBenches.includes(code)
-        ? s.keptBenches.filter((x) => x !== code)
-        : [...s.keptBenches, code],
-    })),
+  setBenchSource: (formation, src) =>
+    set((s) => ({ benchSource: { ...s.benchSource, [formation]: src } })),
 
   toggleCat: (c) => set((s) => ({ cats: { ...s.cats, [c]: !s.cats[c] } })),
 
@@ -285,15 +394,8 @@ export const useStore = create<State>((set, get) => ({
     })),
   restoreAllCulled: () => set({ culledWells: [] }),
 
-  setMode: (mode) => set({ mode }),
   setParam: (k, v) => set((s) => ({ params: { ...s.params, [k]: v } })),
   setSourceAzimuth: (sourceAzimuth) => set({ sourceAzimuth }),
-  toggleWinerackFormation: (f) =>
-    set((s) => ({
-      winerackFormations: s.winerackFormations.includes(f)
-        ? s.winerackFormations.filter((x) => x !== f)
-        : [...s.winerackFormations, f],
-    })),
   setBenchSpacing: (f, v) => set((s) => ({ benchSpacing: { ...s.benchSpacing, [f]: v } })),
   setBenchTvd: (f, v) => set((s) => {
     const benchTvd = { ...s.benchTvd };
@@ -302,36 +404,14 @@ export const useStore = create<State>((set, get) => ({
     return { benchTvd };
   }),
 
-  buildRequest: () => {
-    const s = get();
-    if (!s.parcel) return null;
-    const base: GenerateRequest = {
-      parcel: s.parcel.geojson, params: s.params, mode: s.mode,
-      source_azimuth: s.sourceAzimuth, buffer_ft: 5280,
-    };
-    if (s.mode === "winerack") {
-      // explicit per-bench zones: TVD from discovered benches (PDP or Novi-PUD
-      // sourced), spacing per bench (user override -> derived -> base). Bypasses the
-      // PDP-only source_tvd gate so Novi-PUD-only benches (BS1_S, WCB_1…) develop.
-      base.zones = s.winerackFormations.map((f) => {
-        const b = s.devBenches.find((d) => d.formation === f);
-        return {
-          formation: f,
-          // hard user TVD (geologist's pick) -> warehouse median -> base param
-          target_tvd_ft: s.benchTvd[f] ?? b?.median_tvd_ft ?? s.params.target_tvd_ft,
-          spacing_ft: s.benchSpacing[f] ?? b?.suggested_spacing_ft ?? s.params.spacing_ft,
-        };
-      });
-    }
-    return base;
-  },
+  buildRequest: () => buildRequestFrom(get()),
 
   generate: async () => {
     const req = get().buildRequest();
-    if (!req) { set({ error: "select a parcel first" }); return; }
+    if (!req) { set({ error: "set at least one bench to generate" }); return; }
     set({ loading: true, error: null });
     try {
-      set({ result: await api.generate(req), loading: false });
+      set({ result: await api.generate(req), lastGenKey: JSON.stringify(req), loading: false });
     } catch (e) { set({ error: String(e), loading: false }); }
   },
 
@@ -340,25 +420,28 @@ export const useStore = create<State>((set, get) => ({
     catch (e) { set({ error: String(e) }); }
   },
 
+  // One save for the whole composed plan: the server re-derives the kept Novi
+  // baseline, regenerates the generate-sourced benches from the recipe, merges,
+  // bakes culls out, and persists — so the saved rows never depend on client
+  // display state.
   save: async (name) => {
     const s = get();
-    if (!s.parcel) return;
+    if (!s.parcel || !s.inventory) return;
     const deal = dealIdFor(s.parcel.label);
     // scenario_id derives from the NAME so differently-named saves are distinct
     // rows; re-saving under the same name overwrites that row (deliberate).
     const slug = dealIdFor(name || s.parcel.label);
     try {
-      if (s.appMode === "curate") {
-        // persist the kept Novi inventory baseline (selected benches + active cats)
-        const cats = (["pdp", "pud", "res"] as Category[]).filter((c) => s.cats[c]);
-        await api.saveCurateScenario(deal, `curate_${slug}`, name || s.parcel.label,
-          s.parcel.geojson, s.keptBenches, cats, s.culledWells);
-      } else {
-        const req = s.buildRequest();
-        if (!req) return;
-        await api.saveScenario(deal, `${s.params.well_type}_${s.params.objective}_${slug}`,
-          name || s.parcel.label, req, s.culledWells);
-      }
+      await api.saveComposedScenario({
+        deal_id: deal, scenario_id: `plan_${slug}`, name: name || s.parcel.label,
+        parcel: s.parcel.geojson,
+        bench_sources: s.benchSource,
+        categories: (["pdp", "pud", "res"] as Category[]).filter((c) => s.cats[c]),
+        culled_wells: s.culledWells,
+        params: s.params,
+        zones: zonesForGenerate(s),
+        source_azimuth: s.sourceAzimuth,
+      });
       await get().refreshScenarios();
     } catch (e) { set({ error: String(e) }); }
   },
@@ -368,36 +451,68 @@ export const useStore = create<State>((set, get) => ({
     try {
       const r = await api.loadScenario(deal_id, scenario_id);
       const meta = get().scenarios.find((s) => s.deal_id === deal_id && s.scenario_id === scenario_id);
-      const summary = r.header?.summary as Partial<CurateSummary> | null | undefined;
-      if (summary?.mode === "curate" && r.parcel) {
-        // a curate save is a filter recipe over live inventory — restore the
-        // EDITABLE curate state (re-select the parcel, refetch inventory,
-        // re-apply the recipe) so the loaded scenario renders through the same
-        // path it was saved from and stays curate-editable
-        const restored = r.parcel;
-        const parcels = get().parcels.some((p) => p.label === restored.label)
+      const summary = r.header?.summary as
+        Partial<ComposedSummary> | Partial<CurateSummary> | null | undefined;
+      const mergeParcels = (restored: ParcelInfo) =>
+        get().parcels.some((p) => p.label === restored.label)
           ? get().parcels : [...get().parcels, restored];
+
+      if (summary?.mode === "composed" && r.parcel) {
+        // composed save = the full recipe: restore bench sources + generator
+        // inputs, refetch live inventory, regenerate the generate benches —
+        // the working set reconstructs editable, exactly as saved
+        const cs = summary as ComposedSummary;
+        const zones = cs.generate?.zones ?? [];
         set({
-          appMode: "curate", parcels, parcel: restored, result: null,
-          inventory: null, benchTvd: {}, culledWells: [],
+          parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
+          loaded: { deal_id, name: meta?.name ?? null },
+          params: { ...get().params, ...paramsFromScenario(cs.generate?.params) },
+          sourceAzimuth: cs.generate?.source_azimuth ?? true,
+          benchSource: (cs.bench_sources ?? {}) as Record<string, BenchSource>,
+          cats: {
+            pdp: (cs.categories ?? []).includes("pdp"),
+            pud: (cs.categories ?? []).includes("pud"),
+            res: (cs.categories ?? []).includes("res"),
+          },
+          benchTvd: Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft])),
+          benchSpacing: Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
+            .map((z) => [z.formation, z.spacing_ft as number])),
+        });
+        await get().fetchInventory({ seed: false });
+        set({ culledWells: cs.culled_wells ?? [], loading: false });
+        if (Object.values(cs.bench_sources ?? {}).includes("generate")) {
+          await get().generate();
+        }
+        return;
+      }
+
+      if (summary?.mode === "curate" && r.parcel) {
+        // legacy curate save = a filter recipe over live inventory — map it into
+        // the unified model: kept benches with Novi inventory -> source 'novi'
+        set({
+          parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
           loaded: { deal_id, name: meta?.name ?? null },
         });
-        await get().fetchInventory();
+        await get().fetchInventory({ seed: false });
+        const kept = new Set(summary.kept_benches ?? []);
         const active = new Set(summary.categories ?? ["pdp", "pud", "res"]);
+        const src: Record<string, BenchSource> = {};
+        for (const row of benchRows(get())) {
+          src[row.formation] = kept.has(row.formation) && row.hasNovi ? "novi" : "off";
+        }
         set({
-          keptBenches: summary.kept_benches ?? get().keptBenches,
+          benchSource: src,
           cats: { pdp: active.has("pdp"), pud: active.has("pud"), res: active.has("res") },
           culledWells: summary.culled_wells ?? [],
           loading: false,
         });
         return;
       }
-      // Restore the saved parcel here too: the gun-barrel merges the store's
-      // inventory PDP as offset context, so inventory left over from a
-      // previously selected parcel would overlay foreign wells in the wrong
-      // offset frame (its offsets are relative to THAT parcel's centroid).
-      // Refetch only when the parcel actually changes — inventory queries are
-      // the expensive part of a load.
+
+      // legacy override save: show the persisted wells immediately (frozen
+      // result) and map the recipe into the unified model — the generated
+      // formations become generate-sourced benches, so the plan stays editable.
+      const gen = (summary as OverrideSummary | null | undefined)?.generate;
       const restored = r.parcel;
       // deal_id derives from the parcel label on save, so it identifies the
       // parcel whether the current one carries the shapefile name or the slug
@@ -405,34 +520,32 @@ export const useStore = create<State>((set, get) => ({
       const sameParcel = restored != null && cur != null && dealIdFor(cur.label) === deal_id;
       const parcels = restored && !sameParcel && !get().parcels.some((p) => p.label === restored.label)
         ? [...get().parcels, restored] : get().parcels;
-      // Restore the generator RECIPE so the loaded scenario is re-editable
-      // (tweak one param -> Generate reproduces + varies the saved plan) instead
-      // of a frozen snapshot: new saves carry the exact GenerateRequest in
-      // summary.generate; older saves fall back to the persisted ScenarioParams
-      // (single-bench fields only — zones weren't kept back then).
-      const gen = (summary as OverrideSummary | null | undefined)?.generate;
-      const zones = gen?.zones ?? [];
       const params: Params = gen
         ? { ...get().params, ...gen.params }
         : { ...get().params, ...paramsFromScenario(r.header?.params) };
+      const zones = gen?.zones ?? [];
+      const src: Record<string, BenchSource> = {};
+      for (const z of zones) src[z.formation] = "generate";
+      if (zones.length === 0 && params.formation) src[params.formation] = "generate";
+      for (const pt of (r.gunbarrel?.points ?? []) as GunbarrelData["points"]) {
+        if (pt.category === "generated") src[pt.formation] = "generate";
+      }
       set({
-        appMode: "override",
         parcels,
         parcel: sameParcel ? cur : restored ?? cur,
-        ...(sameParcel ? {} : { inventory: null }),
+        ...(sameParcel ? {} : { inventory: null, benches: [], devBenches: [] }),
         params,
-        mode: gen?.mode ?? (zones.length ? "winerack" : "single"),
         sourceAzimuth: gen?.source_azimuth ?? get().sourceAzimuth,
-        // zones pin the exact per-bench TVD/spacing that produced the saved plan
-        // (hard overrides — immune to warehouse drift); without a recipe, keep
-        // the old behavior of clearing structural overrides on a parcel change
-        ...(zones.length ? {
-          winerackFormations: zones.map((z) => z.formation),
-          benchTvd: Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft])),
-          benchSpacing: Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
-            .map((z) => [z.formation, z.spacing_ft as number])),
-        } : (sameParcel ? {} : { benchTvd: {} })),
+        benchSource: src,
+        benchTvd: zones.length
+          ? Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft]))
+          : (params.formation ? { [params.formation]: params.target_tvd_ft } : {}),
+        benchSpacing: zones.length
+          ? Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
+              .map((z) => [z.formation, z.spacing_ft as number]))
+          : (params.formation ? { [params.formation]: params.spacing_ft } : {}),
         culledWells: [],
+        lastGenKey: null,
         loaded: { deal_id, name: meta?.name ?? null },
         result: {
           mode: "loaded", placed_wells: 0, placed_legs: 0, azimuth_deg: null,

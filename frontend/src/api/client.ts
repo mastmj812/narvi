@@ -102,6 +102,37 @@ export interface OverrideSummary {
   generate?: Omit<GenerateRequest, "parcel">;
 }
 
+// summary stamped on a composed save (backend /scenarios/composed) — the full
+// plan recipe (per-bench sources + generator inputs) so loads restore the
+// editable working set
+export interface ComposedSummary {
+  mode: "composed";
+  bench_sources: Record<string, string>;
+  categories: Category[];
+  culled_wells: string[];
+  generate?: {
+    params?: Record<string, unknown>;
+    zones?: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
+    source_azimuth?: boolean;
+    buffer_ft?: number;
+  };
+  note?: string;
+  warehouse_notes?: string[];
+}
+
+export interface SaveComposedBody {
+  deal_id: string;
+  scenario_id: string;
+  name: string;
+  parcel: GeoJSON.Geometry;
+  bench_sources: Record<string, string>;
+  categories: Category[];
+  culled_wells: string[];
+  params: Params;
+  zones: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
+  source_azimuth: boolean;
+}
+
 export interface ScenarioSummary {
   deal_id: string;
   scenario_id: string;
@@ -171,6 +202,11 @@ export const api = {
     jpost<{ saved_wells: number }>("/api/scenarios/curate", {
       deal_id, scenario_id, name, parcel, kept_benches, categories, culled_wells, buffer_ft,
     }),
+
+  // culled_wells bake out server-side; the kept Novi baseline + generated wells
+  // persist together as one scenario
+  saveComposedScenario: (body: SaveComposedBody) =>
+    jpost<{ saved_wells: number }>("/api/scenarios/composed", body),
 
   loadScenario: (deal_id: string, scenario_id: string) =>
     jget<{

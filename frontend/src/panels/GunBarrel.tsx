@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GunbarrelData } from "../api/client";
 import { colorForBlueox } from "../map/formations";
-import { catActive, useStore } from "../store";
+import { composeGunbarrel, useStore } from "../store";
 
 const M = { l: 46, r: 12, t: 10, b: 22 };
 
@@ -76,10 +76,9 @@ function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
 }
 
 export function GunBarrel() {
-  const appMode = useStore((s) => s.appMode);
   const inventory = useStore((s) => s.inventory);
   const result = useStore((s) => s.result);
-  const keptBenches = useStore((s) => s.keptBenches);
+  const benchSource = useStore((s) => s.benchSource);
   const cats = useStore((s) => s.cats);
   const culledWells = useStore((s) => s.culledWells);
   const toggleCull = useStore((s) => s.toggleCull);
@@ -87,37 +86,20 @@ export function GunBarrel() {
   const toggleGbFlip = useStore((s) => s.toggleGbFlip);
   const culledSet = useMemo(() => new Set(culledWells), [culledWells]);
 
-  // Points/links come from the active source (filtered in curate); the legend is
-  // ALWAYS rebuilt from the shared formation_blueox palette so swatches match the
-  // markers (the backend's per-scenario palette is ignored here). In override the
-  // parcel's PDP wells (already fetched with the inventory) merge in as dimmed
-  // context — same canonical offset frame, so they land where they belong.
+  // One composed working set (store.composeGunbarrel): Novi-sourced benches from
+  // the inventory + generate-sourced benches from the result + PDP reference.
+  // The legend is ALWAYS rebuilt from the shared formation_blueox palette so
+  // swatches match the markers (the backend's palette is ignored here).
   const gb = useMemo<GunbarrelData | null>(() => {
-    const raw = appMode === "override" ? result?.gunbarrel : inventory?.gunbarrel;
+    const raw = composeGunbarrel({ inventory, result, benchSource, cats, culledWells });
     if (!raw) return null;
-    // Culled wells (any category) are removed outright — the whole point of a
-    // cull is to take the well out of the picture, so the chart, the map, and
-    // the counts all agree and the TVD axis rescales without it.
-    let points = raw.points.filter((p) => !culledSet.has(p.well_name));
-    let links = raw.links.filter((l) => !culledSet.has(l.well_name));
-    if (appMode === "override") {
-      const pdpCtx = (inventory?.gunbarrel?.points ?? [])
-        .filter((p) => p.category === "pdp" && !culledSet.has(p.well_name))
-        .map((p) => ({ ...p, context: true }));
-      if (cats.pdp) points = [...pdpCtx, ...points];
-    } else {
-      const kept = new Set(keptBenches);
-      points = points.filter((p) =>
-        p.context ? cats.pdp : kept.has(p.formation) && catActive(cats, p.category));
-      links = links.filter((l) => kept.has(l.formation));
-    }
+    const { points, links } = raw;
     const forms = [...new Set(points.map((p) => p.formation))]
       .sort((a, b) =>
         points.find((p) => p.formation === a)!.tvd_ft - points.find((p) => p.formation === b)!.tvd_ft)
       .map((formation) => ({ formation, color: colorForBlueox(formation) }));
-    const azimuth_deg = raw.azimuth_deg ?? inventory?.gunbarrel?.azimuth_deg ?? null;
-    return { formations: forms, points, links, azimuth_deg };
-  }, [appMode, inventory, result, keptBenches, cats, culledSet]);
+    return { formations: forms, points, links, azimuth_deg: raw.azimuth_deg ?? null };
+  }, [inventory, result, benchSource, cats, culledWells]);
 
   // count of PDP wells hidden from the chart (both modes source PDP from inventory)
   const hiddenPdp = useMemo(() => new Set(
@@ -171,10 +153,12 @@ export function GunBarrel() {
   const rightLabel = gbFlip ? minusDir : plusDir;
   const leftLabel = gbFlip ? plusDir : minusDir;
 
-  // header counts reflect the kept UNIT set (culled wells are already gone) —
-  // context is background
+  // header counts reflect the PLAN (culled wells are already gone; PDP carry
+  // context=true so they're reference, shown separately)
   const keptPts = gb.points.filter((p) => !p.context);
   const keptLinks = gb.links;
+  const pdpCount = new Set(
+    gb.points.filter((p) => p.category === "pdp").map((p) => p.well_name)).size;
   const hasFaded = gb.points.some((p) => p.context && p.category !== "pdp");
 
   return (
@@ -183,6 +167,7 @@ export function GunBarrel() {
         <span className="win-title">⠿ Gun-barrel — offset vs TVD</span>
         <span style={{ fontSize: 11, color: "#71717a" }}>
           {keptPts.length - keptLinks.length} wells / {keptPts.length} legs
+          {pdpCount > 0 && <span style={{ color: "#a1a1aa" }}> · {pdpCount} PDP</span>}
           {culledSet.size > 0 && <span style={{ color: "#a1a1aa" }}> · {culledSet.size} culled</span>}
         </span>
         <button
