@@ -16,7 +16,10 @@ from narvi.warehouse import inventory_from_warehouse
 
 from ..deps import get_conn
 from ..engine import run_generate
-from ..models import SaveCurateRequest, SaveScenarioRequest, ScenarioSummary
+from ..models import (
+    GenerateRequest, SaveComposedRequest, SaveCurateRequest, SaveScenarioRequest,
+    ScenarioSummary,
+)
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
@@ -86,6 +89,69 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
         summary={"mode": "curate", "kept_benches": req.kept_benches,
                  "categories": list(cats), "culled_wells": req.culled_wells}, name=req.name)
+    return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
+
+
+@router.post("/composed")
+def save_composed(
+    req: SaveComposedRequest, conn: psycopg.Connection = Depends(get_conn)
+) -> dict:
+    """Persist a composed plan: kept Novi inventory (benches sourced 'novi') plus
+    server-side generated wells (benches sourced 'generate') as ONE scenario.
+    Culls bake out. The full recipe rides summary so loads restore editable."""
+    parcel = parcel_from_geojson(req.parcel)
+    novi_benches = {f for f, s in req.bench_sources.items() if s == "novi"}
+    gen_zones = [z for z in req.zones if req.bench_sources.get(z.formation) == "generate"]
+
+    wells = []
+    note, notes = "", []
+    cats = tuple(c for c in ("pdp", "pud", "res") if c in req.categories)
+    if novi_benches or "pdp" in cats:
+        inv = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
+        # PDP are reality — they persist independent of bench source (the same
+        # rule the client display uses); PUD/RES only from adopted benches
+        wells += [w for w in inv
+                  if w.category == "pdp" or w.formation in novi_benches]
+        note = f"{len(wells)} kept Novi/PDP wells in {len(novi_benches)} benches"
+    p = None
+    if gen_zones:
+        greq = GenerateRequest(
+            parcel=req.parcel, params=req.params, mode="winerack", zones=gen_zones,
+            source_azimuth=req.source_azimuth, buffer_ft=req.buffer_ft)
+        try:
+            _, p, gwells, _, gnote, notes = run_generate(greq)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        wells += gwells
+        note = f"{note}; {gnote}" if note else gnote
+
+    culled = set(req.culled_wells)
+    if culled:
+        wells = [w for w in wells if w.well_name not in culled]
+    if not wells:
+        raise HTTPException(status_code=400, detail="composed plan has no wells")
+    for w in wells:
+        w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
+    if p is None:  # pure-baseline compose: synthetic pass-through header (like curate)
+        p = ScenarioParams(
+            scenario_id=req.scenario_id, deal_id=req.deal_id, formation="",
+            target_tvd_ft=0.0, well_type="single", objective="max_lateral",
+            spacing_ft=0.0, setback_ft=0.0, azimuth_deg=None, min_lateral_ft=0.0)
+    else:
+        p = replace(p, deal_id=req.deal_id, scenario_id=req.scenario_id)
+    n = persist.save_scenario(
+        conn, req.deal_id, req.scenario_id, parcel, p, wells,
+        summary={
+            "mode": "composed", "bench_sources": req.bench_sources,
+            "categories": list(req.categories), "culled_wells": req.culled_wells,
+            "generate": {
+                "params": req.params.model_dump(mode="json"),
+                "zones": [z.model_dump(mode="json") for z in gen_zones],
+                "source_azimuth": req.source_azimuth, "buffer_ft": req.buffer_ft,
+            },
+            "note": note, "warehouse_notes": notes,
+        },
+        name=req.name)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 

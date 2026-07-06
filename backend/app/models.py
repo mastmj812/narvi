@@ -120,6 +120,25 @@ class SaveScenarioRequest(BaseModel):
                                                # hand-off must not carry culled wells
 
 
+class SaveComposedRequest(BaseModel):
+    """Persist a composed plan: per bench the user either adopts the Novi baseline
+    ('novi'), designs their own wells ('generate'), or drops it ('off'). The kept
+    Novi inventory and the generated wells persist together as ONE scenario — the
+    unified successor to the curate/override either-or saves."""
+
+    deal_id: str
+    scenario_id: str
+    name: str | None = None
+    parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
+    bench_sources: dict[str, str]              # formation -> novi | generate | off
+    categories: list[str] = ["pdp", "pud", "res"]   # active display/persist categories
+    culled_wells: list[str] = []               # per-well culls (well_name) baked out
+    params: ScenarioParamsModel                # deal-level generator params
+    zones: list[ZoneModel] = []                # per-bench TVD/spacing (generate benches)
+    source_azimuth: bool = True
+    buffer_ft: float = 5280.0
+
+
 class SaveCurateRequest(BaseModel):
     """Persist a curated Novi-inventory baseline: the existing wells in the parcel,
     trimmed to the kept benches + active categories (not a generated run)."""
