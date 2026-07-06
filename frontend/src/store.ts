@@ -248,7 +248,9 @@ interface State {
   benchTvd: Record<string, number>;
   result: GenerateResponse | null;
   lastGenKey: string | null;       // JSON of the request behind `result` (staleness)
-  loaded: { deal_id: string; name: string | null } | null;  // identity of a loaded scenario (export naming when no parcel)
+  // identity of the loaded / last-saved scenario — drives the "loaded" marker in
+  // the scenario list, seeds the save-name box, and names exports
+  loaded: { deal_id: string; scenario_id: string; name: string | null } | null;
 
   loading: boolean;
   error: string | null;
@@ -432,8 +434,9 @@ export const useStore = create<State>((set, get) => ({
     // rows; re-saving under the same name overwrites that row (deliberate).
     const slug = dealIdFor(name || s.parcel.label);
     try {
+      const finalName = name || s.parcel.label;
       await api.saveComposedScenario({
-        deal_id: deal, scenario_id: `plan_${slug}`, name: name || s.parcel.label,
+        deal_id: deal, scenario_id: `plan_${slug}`, name: finalName,
         parcel: s.parcel.geojson,
         bench_sources: s.benchSource,
         categories: (["pdp", "pud", "res"] as Category[]).filter((c) => s.cats[c]),
@@ -443,6 +446,9 @@ export const useStore = create<State>((set, get) => ({
         source_azimuth: s.sourceAzimuth,
       });
       await get().refreshScenarios();
+      // the saved scenario is now "the one we're working on" — the loaded marker
+      // and the name box follow it (a legacy-loaded id is superseded by plan_*)
+      set({ loaded: { deal_id: deal, scenario_id: `plan_${slug}`, name: finalName } });
     } catch (e) { set({ error: String(e) }); }
   },
 
@@ -465,7 +471,7 @@ export const useStore = create<State>((set, get) => ({
         const zones = cs.generate?.zones ?? [];
         set({
           parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
-          loaded: { deal_id, name: meta?.name ?? null },
+          loaded: { deal_id, scenario_id, name: meta?.name ?? null },
           params: { ...get().params, ...paramsFromScenario(cs.generate?.params) },
           sourceAzimuth: cs.generate?.source_azimuth ?? true,
           benchSource: (cs.bench_sources ?? {}) as Record<string, BenchSource>,
@@ -491,7 +497,7 @@ export const useStore = create<State>((set, get) => ({
         // the unified model: kept benches with Novi inventory -> source 'novi'
         set({
           parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
-          loaded: { deal_id, name: meta?.name ?? null },
+          loaded: { deal_id, scenario_id, name: meta?.name ?? null },
         });
         await get().fetchInventory({ seed: false });
         const kept = new Set(summary.kept_benches ?? []);
@@ -546,7 +552,7 @@ export const useStore = create<State>((set, get) => ({
           : (params.formation ? { [params.formation]: params.spacing_ft } : {}),
         culledWells: [],
         lastGenKey: null,
-        loaded: { deal_id, name: meta?.name ?? null },
+        loaded: { deal_id, scenario_id, name: meta?.name ?? null },
         result: {
           mode: "loaded", placed_wells: 0, placed_legs: 0, azimuth_deg: null,
           summary: `loaded ${deal_id} / ${scenario_id}`, warehouse_notes: [],

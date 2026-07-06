@@ -152,7 +152,21 @@ def save_composed(
             "note": note, "warehouse_notes": notes,
         },
         name=req.name)
-    return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
+    # NAME is the user-facing identity within a deal: saving under an existing
+    # name REPLACES whatever row held it, even across id schemes (a legacy
+    # curate_*/single_* row being upgraded by a re-save would otherwise linger
+    # as a same-name duplicate). Wells cascade with the header row.
+    replaced = 0
+    if req.name:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM narvi.scenario "
+                "WHERE deal_id = %s AND name = %s AND scenario_id <> %s",
+                (req.deal_id, req.name, req.scenario_id))
+            replaced = cur.rowcount
+        conn.commit()
+    return {"saved_wells": n, "replaced": replaced,
+            "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 
 @router.get("/{deal_id}/{scenario_id}")

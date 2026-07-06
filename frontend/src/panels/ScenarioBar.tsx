@@ -16,6 +16,10 @@ export function ScenarioBar() {
 
   useEffect(() => { refreshScenarios(); }, [refreshScenarios]);
 
+  // the name box tracks the loaded/last-saved scenario, so "Save" overwrites it
+  // by default; a new deal (loaded -> null) clears the box
+  useEffect(() => { setName(loaded?.name ?? ""); }, [loaded]);
+
   // saving needs a parcel + inventory (the composed save re-derives the kept
   // Novi baseline and regenerates server-side); export only needs the current
   // FC, so it also works on a loaded scenario.
@@ -84,21 +88,32 @@ export function ScenarioBar() {
 
       <div style={{ marginTop: 8 }}>
         {scenarios.length === 0 && <div className="note">no saved scenarios</div>}
-        {scenarios.map((s) => (
-          <div className="scenario-row" key={`${s.deal_id}/${s.scenario_id}`}>
-            <div>
-              <div>{s.name ?? s.deal_id}</div>
-              <div className="meta">
-                {s.scenario_id} · {s.total_wells ?? 0}w
-                {s.total_completed_ft != null && <> · {(s.total_completed_ft / 1000).toFixed(0)}k ft</>}
+        {scenarios.map((s) => {
+          const isLoaded = loaded?.deal_id === s.deal_id && loaded?.scenario_id === s.scenario_id;
+          return (
+            <div
+              className="scenario-row" key={`${s.deal_id}/${s.scenario_id}`}
+              style={isLoaded
+                ? { background: "var(--accent-soft, #eef2ff)", borderRadius: 5, padding: "2px 4px" }
+                : undefined}
+            >
+              <div>
+                <div style={{ fontWeight: isLoaded ? 600 : 400 }}>
+                  {s.name ?? s.deal_id}
+                  {isLoaded && <span style={{ color: "var(--accent, #2563eb)", fontSize: 10 }}> · loaded</span>}
+                </div>
+                <div className="meta">
+                  {s.scenario_id} · {s.total_wells ?? 0}w
+                  {s.total_completed_ft != null && <> · {(s.total_completed_ft / 1000).toFixed(0)}k ft</>}
+                </div>
+              </div>
+              <div className="row" style={{ flex: "0 0 auto" }}>
+                <button className="ghost" onClick={() => load(s.deal_id, s.scenario_id)}>Load</button>
+                <button className="ghost" onClick={() => remove(s.deal_id, s.scenario_id)}>✕</button>
               </div>
             </div>
-            <div className="row" style={{ flex: "0 0 auto" }}>
-              <button className="ghost" onClick={() => load(s.deal_id, s.scenario_id)}>Load</button>
-              <button className="ghost" onClick={() => remove(s.deal_id, s.scenario_id)}>✕</button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
