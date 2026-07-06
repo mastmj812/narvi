@@ -23,10 +23,10 @@ function NumberField<K extends keyof Params>(
 export function ParamsPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const {
-    parcel, parcels, mode, params, sourceAzimuth, winerackFormations, benchSpacing, benchTvd,
+    parcel, parcels, inventory, mode, params, sourceAzimuth, winerackFormations, benchSpacing, benchTvd,
     devBenches, result, loading, error,
     selectParcel, setMode, setParam, setSourceAzimuth, toggleWinerackFormation, setBenchSpacing,
-    setBenchTvd, loadSynthetic, uploadParcels, generate,
+    setBenchTvd, loadSynthetic, uploadParcels, fetchInventory, generate,
   } = useStore();
 
   return (
@@ -54,6 +54,12 @@ export function ParamsPanel() {
             </select>
           </div>
         )}
+        {parcel && !inventory && (
+          <button className="primary" style={{ marginTop: 8 }} disabled={loading}
+            onClick={() => fetchInventory()}>
+            {loading ? "loading inventory…" : "Load inventory"}
+          </button>
+        )}
       </div>
 
       <div className="section">
@@ -66,7 +72,14 @@ export function ParamsPanel() {
 
       <div className="section">
         <h2>Parameters</h2>
-        <NumberField label="spacing (ft)" k="spacing_ft" step={10} />
+        <NumberField
+          label={mode === "winerack" ? "default spacing (ft)" : "spacing (ft)"} k="spacing_ft" step={10}
+          title={mode === "winerack"
+            ? "fallback only: seeds a bench's spacing when it has no suggested or per-bench value "
+              + "(each bench's own spacing below is what places its wells). For U-turn wine-racks it "
+              + "also gates turn feasibility (leg-to-leg floor) deal-wide."
+            : "leg-to-leg spacing (also the U-turn leg separation)"}
+        />
         <NumberField
           label="setback N/S (ft)" k="setback_ns_ft" step={10}
           title="setback on the N/S boundaries (the toe/heel ends for ~N-S development)"

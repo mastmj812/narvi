@@ -13,7 +13,7 @@ export function CuratePanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const {
     parcel, parcels, benches, keptBenches, cats, inventory, culledWells, loading, error,
-    selectParcel, loadSynthetic, uploadParcels, toggleBench, toggleCat,
+    selectParcel, loadSynthetic, uploadParcels, fetchInventory, toggleBench, toggleCat,
   } = useStore();
 
   // culled wells are out of the deal, so every count excludes them; distinct
@@ -50,7 +50,12 @@ export function CuratePanel() {
             </select>
           </div>
         )}
-        {loading && <div className="note">loading inventory…</div>}
+        {parcel && !inventory && (
+          <button className="primary" style={{ marginTop: 8 }} disabled={loading}
+            onClick={() => fetchInventory()}>
+            {loading ? "loading inventory…" : "Load inventory"}
+          </button>
+        )}
         {error && <div className="error">{error}</div>}
       </div>
 

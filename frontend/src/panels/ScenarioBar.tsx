@@ -4,8 +4,15 @@ import { exportGeoJSON, exportWellCSV } from "../export";
 
 export function ScenarioBar() {
   const { scenarios, parcel, result, appMode, inventory, culledWells, loaded,
-    refreshScenarios, save, load, remove, restoreAllCulled } = useStore();
+    refreshScenarios, save, load, remove, toggleCull, restoreAllCulled } = useStore();
   const [name, setName] = useState("");
+
+  // friendlier display name for a culled well (Novi wellname when we have it);
+  // the cull itself keys on well_name
+  const displayName = (wellName: string) => {
+    const pts = [...(inventory?.gunbarrel?.points ?? []), ...(result?.gunbarrel?.points ?? [])];
+    return pts.find((p) => p.well_name === wellName)?.novi_wellname ?? wellName;
+  };
 
   useEffect(() => { refreshScenarios(); }, [refreshScenarios]);
 
@@ -56,6 +63,24 @@ export function ScenarioBar() {
           </span>
         )}
       </div>
+
+      {culledWells.length > 0 && (
+        <div className="note" style={{ marginTop: 4, maxHeight: 110, overflowY: "auto" }}>
+          {culledWells.map((w) => (
+            <div key={w} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ textDecoration: "line-through", opacity: 0.7 }}>{displayName(w)}</span>
+              <button
+                title="restore this well"
+                onClick={() => toggleCull(w)}
+                style={{ background: "none", border: 0, padding: "0 2px", color: "var(--accent, #2563eb)",
+                  cursor: "pointer", font: "inherit" }}
+              >
+                ↩
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div style={{ marginTop: 8 }}>
         {scenarios.length === 0 && <div className="note">no saved scenarios</div>}
