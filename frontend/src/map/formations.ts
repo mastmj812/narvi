@@ -33,9 +33,10 @@ export function colorForBlueox(code: string | null | undefined): string {
   return MERGED[code] ?? OTHER_COLOR;
 }
 
-// MapLibre `match` on the leg's `formation` (a formation_blueox code) -> color.
-export function blueoxColorExpression(): ExpressionSpecification {
+// MapLibre `match` on a formation_blueox property -> color. Scenario legs carry
+// the code as `formation`; the PDP tile layer carries it as `formation_blueox`.
+export function blueoxColorExpression(property = "formation"): ExpressionSpecification {
   const pairs: unknown[] = [];
   for (const [code, color] of Object.entries(MERGED)) pairs.push(code, color);
-  return ["match", ["get", "formation"], ...pairs, OTHER_COLOR] as unknown as ExpressionSpecification;
+  return ["match", ["get", property], ...pairs, OTHER_COLOR] as unknown as ExpressionSpecification;
 }

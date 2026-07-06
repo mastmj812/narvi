@@ -213,6 +213,13 @@ def _well_from_detail(detail: dict) -> InventoryWell:
         drilled_lateral_ft=detail["drilled_lateral_ft"],
         nearest_neighbor_spacing_ft=detail["nearest_neighbor_spacing_ft"],
         setback_ft=detail["setback_ft"],
+        # provenance — needed for the curate baseline (Novi pass-through) to reload
+        # faithfully; defaults keep generated/override wells unchanged.
+        category=detail.get("category", "generated"),
+        novi_wellname=detail.get("novi_wellname"),
+        edited=detail.get("edited", False),
+        recon_status=detail.get("recon_status"),
+        context=detail.get("context", False),
     )
 
 
@@ -227,7 +234,7 @@ def load_scenario(
             SELECT deal_id, scenario_id, name, well_type, objective, spacing_ft,
                    setback_ft, setback_ns_ft, setback_ew_ft, azimuth_deg,
                    min_lateral_ft, total_wells, total_legs, total_completed_ft,
-                   total_drilled_ft, created_at, updated_at
+                   total_drilled_ft, summary, created_at, updated_at
             FROM narvi.scenario WHERE deal_id = %s AND scenario_id = %s
             """,
             (deal_id, scenario_id),

@@ -26,17 +26,18 @@ def test_health():
 def test_generate_single_returns_geojson_and_gunbarrel():
     body = {
         "parcel": _synthetic_parcel_geojson(),
+        # center anchor max-packs the 4,880 ft window at 880 ft -> 6 laterals
         "params": {"spacing_ft": 880, "setback_ft": 200, "formation": "WCA_1",
-                   "target_tvd_ft": 11500, "azimuth_deg": 0.0},
+                   "target_tvd_ft": 11500, "azimuth_deg": 0.0, "anchor": "center"},
         "mode": "single",
     }
     r = client.post("/api/generate", json=body)
     assert r.status_code == 200
     d = r.json()
-    assert d["placed_wells"] == 5 and d["placed_legs"] == 5
+    assert d["placed_wells"] == 6 and d["placed_legs"] == 6
     kinds = [f["properties"]["kind"] for f in d["geojson"]["features"]]
-    assert kinds.count("leg") == 5 and kinds.count("parcel") == 1
-    assert len(d["gunbarrel"]["points"]) == 5
+    assert kinds.count("leg") == 6 and kinds.count("parcel") == 1
+    assert len(d["gunbarrel"]["points"]) == 6
 
 
 def test_generate_uturn_has_turns():

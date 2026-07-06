@@ -24,10 +24,26 @@ from shapely.ops import transform as shp_transform
 from .parcel import WORK_EPSG
 from .records import InventoryWell
 
-# bench palette (shallow -> deep order assigned by the caller); shared so the
-# map and the gun-barrel color a formation the same way.
-PALETTE = ["#f97316", "#2563eb", "#10b981", "#a855f7", "#dc2626",
-           "#0891b2", "#eab308", "#db2777"]
+# formation_blueox -> color, mirrored from the suite palette (frontend
+# map/formations.ts, itself mirrored from erebor/anduin) so a bench is the SAME
+# color everywhere and never re-indexes when the well set changes (save/load
+# round-trips, bench toggles, curate vs override). Delaware and Midland never
+# co-display, so hues are deliberately reused across basins. Unknown codes get
+# the OTHER gray — matching the frontend's colorForBlueox fallback.
+OTHER_COLOR = "#9ca3af"
+FORMATION_COLORS = {
+    # shared (both basins)
+    "WCA_1": "#f97316", "WCB_1": "#22c55e", "WCB_2": "#ec4899", "WCC": "#8b5cf6",
+    "WCD": "#0ea5e9", "STRN": "#78716c", "BRNT": "#2563eb", "MISS": "#dc2626",
+    "WDFD": "#4d7c0f", "OTHER": OTHER_COLOR,
+    # Delaware
+    "AVA_0": "#06b6d4", "AVA_1": "#f43f5e", "AVA_2": "#84cc16",
+    "BS1_S": "#eab308", "BS2_C": "#a855f7", "BS2_S": "#14b8a6",
+    "BS3_C": "#fb923c", "BS3_S": "#d946ef", "WCXY": "#65a30d", "WCA_2": "#e11d48",
+    # Midland
+    "US": "#06b6d4", "MS": "#f43f5e", "JM": "#a855f7",
+    "LSSH": "#eab308", "DEAN": "#14b8a6", "MRMC": "#d946ef",
+}
 _LEG_COLOR = "#f97316"     # producing leg (plan view)
 _TURN_COLOR = "#a855f7"    # non-producing U-turn arc
 
@@ -63,8 +79,7 @@ def formation_order(wells: list[InventoryWell]) -> list[str]:
 
 
 def formation_colors(wells: list[InventoryWell]) -> dict[str, str]:
-    forms = formation_order(wells)
-    return {f: PALETTE[i % len(PALETTE)] for i, f in enumerate(forms)}
+    return {f: FORMATION_COLORS.get(f, OTHER_COLOR) for f in formation_order(wells)}
 
 
 def scenario_geojson(
@@ -94,7 +109,7 @@ def scenario_geojson(
                 "properties": {
                     "kind": "leg", "well_name": w.well_name, "well_type": w.well_type,
                     "category": w.category, "novi_wellname": w.novi_wellname,
-                    "recon_status": w.recon_status,
+                    "recon_status": w.recon_status, "context": w.context,
                     "formation": w.formation, "formation_color": colors.get(w.formation, _LEG_COLOR),
                     "target_tvd_ft": w.target_tvd_ft, "leg_index": i,
                     "length_ft": leg.length_ft, "gunbarrel_x_ft": leg.gunbarrel_x_ft,
@@ -122,7 +137,8 @@ def gunbarrel_data(wells: list[InventoryWell]) -> dict:
     """Cross-section data (looking down the lateral axis): each producing leg is a
     point at (cross-section offset_ft, target TVD); a U-turn's two legs are joined
     by a link at their TVD. `formations` is shallow->deep with palette colors so a
-    chart can build a bench legend."""
+    chart can build a bench legend. `azimuth_deg` lets the chart label the axis
+    ends with compass directions (+offset = cross_axis of the folded azimuth)."""
     colors = formation_colors(wells)
     points, links = [], []
     for w in wells:
@@ -131,7 +147,7 @@ def gunbarrel_data(wells: list[InventoryWell]) -> dict:
                 "well_name": w.well_name, "formation": w.formation,
                 "color": colors[w.formation], "well_type": w.well_type,
                 "category": w.category, "novi_wellname": w.novi_wellname,
-                "recon_status": w.recon_status,
+                "recon_status": w.recon_status, "context": w.context,
                 "offset_ft": leg.gunbarrel_x_ft, "tvd_ft": w.target_tvd_ft,
             })
         if w.turn is not None and len(w.legs) == 2:
@@ -142,7 +158,9 @@ def gunbarrel_data(wells: list[InventoryWell]) -> dict:
                 "offset_b_ft": w.legs[1].gunbarrel_x_ft,
             })
     legend = [{"formation": f, "color": colors[f]} for f in formation_order(wells)]
-    return {"formations": legend, "points": points, "links": links}
+    az = next((w.lateral_azimuth_deg for w in wells if not w.context),
+              wells[0].lateral_azimuth_deg if wells else None)
+    return {"formations": legend, "points": points, "links": links, "azimuth_deg": az}
 
 
 # --------------------------------------------------------------------------- #

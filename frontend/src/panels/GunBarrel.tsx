@@ -7,24 +7,31 @@ const M = { l: 46, r: 12, t: 10, b: 22 };
 
 type Pt = GunbarrelData["points"][number];
 
-// PDP = solid circle, PUD = hollow (white) circle, RES = hollow triangle; color =
-// formation_blueox (erebor convention). `generated` (override) renders solid.
-function Marker({ p, cx, cy, color, on }: {
+// Existing (PDP) = solid circle; planned (PUD + generated) = hollow (white)
+// circle; RES = hollow triangle; color = formation_blueox (erebor convention).
+// Click culls the well: culled wells disappear everywhere (chart, map, counts)
+// and the TVD axis rescales without them. Restore: PDP via its stick on the
+// basin-wide map layer; anything via "restore all" in the scenario bar.
+// Context (near-parcel offset PDP) renders small + faded.
+function Marker({ p, cx, cy, color, on, onToggle }: {
   p: Pt; cx: number; cy: number; color: string;
   on: (p: Pt | null, e?: React.MouseEvent) => void;
+  onToggle: (p: Pt) => void;
 }) {
-  const r = 4;
-  const hollow = p.category === "pud" || p.category === "res";
+  const r = p.context ? 3 : 4;
+  const hollow = p.category === "pud" || p.category === "res" || p.category === "generated";
   const paint = {
     fill: hollow ? "#ffffff" : color,
     stroke: hollow ? color : "#3f3f46",
     strokeWidth: hollow ? 1.5 : 0.7,
-    opacity: p.category === "res" ? 0.85 : 1,
+    opacity: p.context ? 0.35 : p.category === "res" ? 0.85 : 1,
   };
   const h = {
     onMouseEnter: (e: React.MouseEvent) => on(p, e),
     onMouseMove: (e: React.MouseEvent) => on(p, e),
     onMouseLeave: () => on(null),
+    onClick: () => onToggle(p),
+    style: { cursor: "pointer" as const },
   };
   const shape = p.category === "res"
     ? <polygon points={`${cx},${cy - r} ${cx - r},${cy + r} ${cx + r},${cy + r}`} {...paint} {...h} />
@@ -53,6 +60,7 @@ function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
       <table style={{ fontSize: 11, borderCollapse: "collapse" }}>
         <tbody>
           {row("Category", p.category.toUpperCase())}
+          {p.context ? row("Role", "offset context") : null}
           {row("Bench", p.formation)}
           {p.recon_status ? row("Status", p.recon_status.replace(/_/g, " ")) : null}
           {row("TVD", `${Math.round(p.tvd_ft).toLocaleString()} ft`)}
@@ -69,25 +77,49 @@ export function GunBarrel() {
   const result = useStore((s) => s.result);
   const keptBenches = useStore((s) => s.keptBenches);
   const cats = useStore((s) => s.cats);
+  const culledWells = useStore((s) => s.culledWells);
+  const toggleCull = useStore((s) => s.toggleCull);
+  const gbFlip = useStore((s) => s.gbFlip);
+  const toggleGbFlip = useStore((s) => s.toggleGbFlip);
+  const culledSet = useMemo(() => new Set(culledWells), [culledWells]);
 
   // Points/links come from the active source (filtered in curate); the legend is
   // ALWAYS rebuilt from the shared formation_blueox palette so swatches match the
-  // markers (the backend's per-scenario palette is ignored here).
+  // markers (the backend's per-scenario palette is ignored here). In override the
+  // parcel's PDP wells (already fetched with the inventory) merge in as dimmed
+  // context — same canonical offset frame, so they land where they belong.
   const gb = useMemo<GunbarrelData | null>(() => {
     const raw = appMode === "override" ? result?.gunbarrel : inventory?.gunbarrel;
     if (!raw) return null;
-    let points = raw.points, links = raw.links;
-    if (appMode !== "override") {
+    // Culled wells (any category) are removed outright — the whole point of a
+    // cull is to take the well out of the picture, so the chart, the map, and
+    // the counts all agree and the TVD axis rescales without it.
+    let points = raw.points.filter((p) => !culledSet.has(p.well_name));
+    let links = raw.links.filter((l) => !culledSet.has(l.well_name));
+    if (appMode === "override") {
+      const pdpCtx = (inventory?.gunbarrel?.points ?? [])
+        .filter((p) => p.category === "pdp" && !culledSet.has(p.well_name))
+        .map((p) => ({ ...p, context: true }));
+      if (cats.pdp) points = [...pdpCtx, ...points];
+    } else {
       const kept = new Set(keptBenches);
-      points = raw.points.filter((p) => kept.has(p.formation) && catActive(cats, p.category));
-      links = raw.links.filter((l) => kept.has(l.formation));
+      points = points.filter((p) =>
+        p.context ? cats.pdp : kept.has(p.formation) && catActive(cats, p.category));
+      links = links.filter((l) => kept.has(l.formation));
     }
     const forms = [...new Set(points.map((p) => p.formation))]
       .sort((a, b) =>
         points.find((p) => p.formation === a)!.tvd_ft - points.find((p) => p.formation === b)!.tvd_ft)
       .map((formation) => ({ formation, color: colorForBlueox(formation) }));
-    return { formations: forms, points, links };
-  }, [appMode, inventory, result, keptBenches, cats]);
+    const azimuth_deg = raw.azimuth_deg ?? inventory?.gunbarrel?.azimuth_deg ?? null;
+    return { formations: forms, points, links, azimuth_deg };
+  }, [appMode, inventory, result, keptBenches, cats, culledSet]);
+
+  // count of PDP wells hidden from the chart (both modes source PDP from inventory)
+  const hiddenPdp = useMemo(() => new Set(
+    (inventory?.gunbarrel?.points ?? [])
+      .filter((p) => p.category === "pdp" && culledSet.has(p.well_name))
+      .map((p) => p.well_name)).size, [inventory, culledSet]);
 
   const [pos, setPos] = useState(() => ({
     x: Math.max(20, window.innerWidth - 460), y: Math.max(60, window.innerHeight - 320),
@@ -117,18 +149,48 @@ export function GunBarrel() {
   };
 
   const W = size.width, H = size.height;
-  const xs = gb.points.map((p) => p.offset_ft), ys = gb.points.map((p) => p.tvd_ft);
+  // flip mirrors the x-axis (scale on the signed values so min/max track the flip)
+  const sgn = gbFlip ? -1 : 1;
+  const xs = gb.points.map((p) => sgn * p.offset_ft), ys = gb.points.map((p) => p.tvd_ft);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const spanX = maxX - minX || 1, spanY = maxY - minY || 1;
-  const sx = (x: number) => M.l + (((x - minX) / spanX) * 0.9 + 0.05) * (W - M.l - M.r);
+  const sx = (x: number) => M.l + (((sgn * x - minX) / spanX) * 0.9 + 0.05) * (W - M.l - M.r);
   const sy = (y: number) => M.t + (((y - minY) / spanY) * 0.9 + 0.05) * (H - M.t - M.b);
+
+  // compass direction of +offset: 90° clockwise of the folded azimuth (the
+  // canonical cross_axis); the flip swaps which end is which.
+  const WINDS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  const az = gb.azimuth_deg;
+  const plusDir = az != null ? WINDS[Math.round((((az % 180) + 90) % 360) / 45) % 8] : null;
+  const minusDir = az != null ? WINDS[(Math.round((((az % 180) + 90) % 360) / 45) + 4) % 8] : null;
+  const rightLabel = gbFlip ? minusDir : plusDir;
+  const leftLabel = gbFlip ? plusDir : minusDir;
+
+  // header counts reflect the kept UNIT set (culled wells are already gone) —
+  // context is background
+  const keptPts = gb.points.filter((p) => !p.context);
+  const keptLinks = gb.links;
+  const hasContext = gb.points.some((p) => p.context);
 
   return (
     <div className="floatwin gb-win" style={{ left: pos.x, top: pos.y }}>
       <div className="win-head" onMouseDown={onHeadDown}>
         <span className="win-title">⠿ Gun-barrel — offset vs TVD</span>
-        <span style={{ fontSize: 11, color: "#71717a" }}>{gb.points.length} wells</span>
+        <span style={{ fontSize: 11, color: "#71717a" }}>
+          {keptPts.length - keptLinks.length} wells / {keptPts.length} legs
+          {culledSet.size > 0 && <span style={{ color: "#a1a1aa" }}> · {culledSet.size} culled</span>}
+        </span>
+        <button
+          title="flip orientation (mirror the x-axis)"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={toggleGbFlip}
+          style={{ marginLeft: "auto", border: "1px solid var(--line, #e5e7eb)", borderRadius: 4,
+            background: gbFlip ? "#eef2ff" : "#fff", cursor: "pointer", fontSize: 12,
+            lineHeight: "16px", padding: "0 6px" }}
+        >
+          ⇋
+        </button>
       </div>
       <div className="win-body" ref={bodyRef}>
         <svg width={W} height={H} style={{ display: "block" }}>
@@ -143,15 +205,26 @@ export function GunBarrel() {
           ))}
           {gb.points.map((p, i) => (
             <Marker key={`p${i}`} p={p} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
-              color={colorForBlueox(p.formation)} on={onHover} />
+              color={colorForBlueox(p.formation)}
+              on={onHover} onToggle={(pt) => toggleCull(pt.well_name)} />
           ))}
           <text x={M.l - 5} y={M.t + 6} textAnchor="end" fontSize={9} fill="#71717a">{minY.toFixed(0)}</text>
           <text x={M.l - 5} y={H - M.b} textAnchor="end" fontSize={9} fill="#71717a">{maxY.toFixed(0)}</text>
           <text x={W / 2} y={H - 6} textAnchor="middle" fontSize={9} fill="#52525b">offset (ft)</text>
+          {leftLabel && (
+            <text x={M.l + 4} y={H - 6} textAnchor="start" fontSize={9} fill="#52525b">← {leftLabel}</text>
+          )}
+          {rightLabel && (
+            <text x={W - M.r - 4} y={H - 6} textAnchor="end" fontSize={9} fill="#52525b">{rightLabel} →</text>
+          )}
         </svg>
       </div>
       <div className="gb-foot">
-        <span>● PDP</span><span>○ PUD</span><span>△ RES</span><span>· color = bench</span>
+        <span>● PDP</span><span>○ planned (PUD / gen)</span><span>△ RES</span><span>· color = bench</span>
+        {hasContext && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
+        {hiddenPdp > 0 && (
+          <span style={{ color: "#a1a1aa" }}>· {hiddenPdp} PDP hidden — click its stick on the map to restore</span>
+        )}
         {gb.formations.map((f) => (
           <span key={f.formation}><i className="swatch" style={{ background: f.color }} />{f.formation}</span>
         ))}

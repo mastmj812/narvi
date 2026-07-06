@@ -2,12 +2,14 @@ import { useRef } from "react";
 import { type Params } from "../api/client";
 import { useStore } from "../store";
 
-function NumberField<K extends keyof Params>({ label, k, step }: { label: string; k: K; step?: number }) {
+function NumberField<K extends keyof Params>(
+  { label, k, step, title }: { label: string; k: K; step?: number; title?: string },
+) {
   const value = useStore((s) => s.params[k]) as number;
   const setParam = useStore((s) => s.setParam);
   return (
     <div className="field">
-      <label>{label}</label>
+      <label title={title}>{label}</label>
       <input
         type="number"
         step={step ?? 1}
@@ -21,10 +23,10 @@ function NumberField<K extends keyof Params>({ label, k, step }: { label: string
 export function ParamsPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const {
-    parcel, parcels, mode, params, sourceAzimuth, winerackFormations, devBenches,
-    result, loading, error,
-    selectParcel, setMode, setParam, setSourceAzimuth, toggleWinerackFormation,
-    loadSynthetic, uploadParcels, generate,
+    parcel, parcels, mode, params, sourceAzimuth, winerackFormations, benchSpacing, benchTvd,
+    devBenches, result, loading, error,
+    selectParcel, setMode, setParam, setSourceAzimuth, toggleWinerackFormation, setBenchSpacing,
+    setBenchTvd, loadSynthetic, uploadParcels, generate,
   } = useStore();
 
   return (
@@ -65,7 +67,14 @@ export function ParamsPanel() {
       <div className="section">
         <h2>Parameters</h2>
         <NumberField label="spacing (ft)" k="spacing_ft" step={10} />
-        <NumberField label="setback (ft)" k="setback_ft" step={10} />
+        <NumberField
+          label="setback N/S (ft)" k="setback_ns_ft" step={10}
+          title="setback on the N/S boundaries (the toe/heel ends for ~N-S development)"
+        />
+        <NumberField
+          label="setback E/W (ft)" k="setback_ew_ft" step={10}
+          title="setback on the E/W boundaries (the lateral-side section lines); 330 ft is the legal default"
+        />
         <NumberField label="min lateral (ft)" k="min_lateral_ft" step={100} />
         <div className="field">
           <label>well type</label>
@@ -100,16 +109,26 @@ export function ParamsPanel() {
             </select>
           </div>
         )}
-        <div className="field">
-          <label>grid azimuth (auto)</label>
-          <input type="checkbox" checked={sourceAzimuth} onChange={(e) => setSourceAzimuth(e.target.checked)} />
-        </div>
+        {(params.anchor === "west" || params.anchor === "east") ? (
+          <div className="field">
+            <label title={`azimuth comes from the ${params.anchor} lease line — laterals run parallel to the setback`}
+              style={{ color: "var(--muted)" }}>
+              grid azimuth (from {params.anchor} line)
+            </label>
+            <input type="checkbox" checked disabled />
+          </div>
+        ) : (
+          <div className="field">
+            <label title="adopt the offset-well grid azimuth sourced from the warehouse">grid azimuth (auto)</label>
+            <input type="checkbox" checked={sourceAzimuth} onChange={(e) => setSourceAzimuth(e.target.checked)} />
+          </div>
+        )}
         {mode === "single" && (
           <>
             <div className="field">
               <label>formation</label>
               <input
-                type="text" value={params.formation} style={{ width: 120 }}
+                type="text" value={params.formation} style={{ width: 150 }}
                 onChange={(e) => setParam("formation", e.target.value)}
               />
             </div>
@@ -123,20 +142,60 @@ export function ParamsPanel() {
           <h2>Benches (developable in area)</h2>
           {devBenches.length === 0 && <div className="note">select a parcel to discover its benches</div>}
           {devBenches.map((b) => {
-            const thin = b.n_pdp < 3;   // < 3 producers -> no confident landing TVD
+            const checked = winerackFormations.includes(b.formation);
+            const sp = benchSpacing[b.formation] ?? b.suggested_spacing_ft ?? params.spacing_ft;
+            const ctrl = [b.n_pdp ? `${b.n_pdp} PDP` : null, b.n_pud ? `${b.n_pud} PUD` : null]
+              .filter(Boolean).join(" · ") || "no control";
             return (
-              <div className="field" key={b.formation}>
-                <label title={thin ? `only ${b.n_pdp} PDP nearby - thin TVD control` : `${b.n_pdp} PDP`}>
-                  {b.formation}
-                  {b.median_tvd_ft != null && (
-                    <span style={{ color: "var(--muted)" }}> {b.median_tvd_ft.toLocaleString()}' · {b.n_pdp} PDP</span>
-                  )}
-                  {thin && <span style={{ color: "#f59e0b" }}> ⚠</span>}
-                </label>
-                <input
-                  type="checkbox" checked={winerackFormations.includes(b.formation)}
-                  onChange={() => toggleWinerackFormation(b.formation)}
-                />
+              <div key={b.formation} style={{ marginBottom: 4 }}>
+                <div className="field">
+                  <label title={`${ctrl}${b.median_tvd_ft != null ? ` @ ${b.median_tvd_ft.toLocaleString()}' TVD` : ""}`}>
+                    {b.formation}
+                    {b.median_tvd_ft != null && (
+                      <span style={{ color: "var(--muted)" }}> {b.median_tvd_ft.toLocaleString()}' · {ctrl}</span>
+                    )}
+                  </label>
+                  <input type="checkbox" checked={checked}
+                    onChange={() => toggleWinerackFormation(b.formation)} />
+                </div>
+                {checked && (
+                  <>
+                    <div className="field" style={{ paddingLeft: 12 }}>
+                      <label style={{ color: "var(--muted)", fontSize: 11 }}
+                        title="leg-to-leg for this bench; Novi develops Bone Spring wider than Wolfcamp">
+                        spacing (ft){b.n_pud ? ` · ${b.n_pud} PUD` : ""}
+                      </label>
+                      <input type="number" step={10} style={{ width: 80 }}
+                        value={Number.isFinite(sp) ? sp : 0}
+                        onChange={(e) => setBenchSpacing(b.formation, Number(e.target.value))} />
+                    </div>
+                    <div className="field" style={{ paddingLeft: 12 }}>
+                      <label
+                        style={{ color: benchTvd[b.formation] != null ? "var(--accent)" : "var(--muted)", fontSize: 11 }}
+                        title="hard TVD for generated locations in this bench (e.g. your geologist's pick) — empty uses the warehouse median; resets on parcel change"
+                      >
+                        TVD (ft){benchTvd[b.formation] != null ? " · override" : " · warehouse"}
+                        {benchTvd[b.formation] != null && (
+                          <>
+                            {" "}
+                            <span
+                              onClick={() => setBenchTvd(b.formation, null)}
+                              style={{ cursor: "pointer", textDecoration: "underline" }}
+                              title="clear the override (back to warehouse median)"
+                            >
+                              reset
+                            </span>
+                          </>
+                        )}
+                      </label>
+                      <input type="number" step={50} style={{ width: 80 }}
+                        value={benchTvd[b.formation] ?? ""}
+                        placeholder={b.median_tvd_ft != null ? String(Math.round(b.median_tvd_ft)) : "—"}
+                        onChange={(e) => setBenchTvd(b.formation,
+                          e.target.value === "" ? null : Number(e.target.value))} />
+                    </div>
+                  </>
+                )}
               </div>
             );
           })}

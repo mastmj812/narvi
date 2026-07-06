@@ -29,11 +29,18 @@ def run_generate(req: GenerateRequest):
     p = req.params.to_narvi()
     notes: list[str] = []
 
-    needs_db = req.source_azimuth or (
+    # A stipulated W/E anchor line defines the azimuth (laterals parallel to that
+    # lease line), so we don't source a grid azimuth — the engine derives it from the
+    # edge. Only hit the DB for the azimuth when no line anchor is chosen.
+    anchor_defines_az = p.anchor in ("west", "east")
+    needs_db = (req.source_azimuth and not anchor_defines_az) or (
         req.mode == "winerack" and req.source_tvd and not req.zones)
     conn = get_connection() if needs_db else None
     try:
-        if req.source_azimuth and p.azimuth_deg is None:
+        if anchor_defines_az:
+            notes.append(f"grid azimuth from the {p.anchor} lease line "
+                         f"(laterals parallel to the setback)")
+        elif req.source_azimuth and p.azimuth_deg is None:
             az = section_azimuth(conn, parcel, req.buffer_ft)
             if az is not None:
                 p = replace(p, azimuth_deg=az)

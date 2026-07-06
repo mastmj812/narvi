@@ -37,10 +37,12 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     as InventoryWells (the curate baseline) + the bench menu. Drives the initial
     map + gun-barrel before any curation."""
     parcel = parcel_from_geojson(req.parcel)
-    # wide pre-filter so any lateral overlapping the unit is fetched; membership is
-    # then decided by co-extent overlap inside inventory_from_warehouse.
-    wells = inventory_from_warehouse(conn, parcel, 5280.0, tuple(req.categories))
-    benches = bench_summary(wells)                          # overlap inventory -> curate
+    # membership is decided by co-extent overlap inside inventory_from_warehouse;
+    # near-parcel PDP comes back flagged context=true (visual background only).
+    wells = inventory_from_warehouse(conn, parcel, req.buffer_ft, tuple(req.categories),
+                                     context_radius_ft=req.context_radius_ft)
+    unit_wells = [w for w in wells if not w.context]
+    benches = bench_summary(unit_wells)                     # overlap inventory -> curate
     # Override designs NEW development, so its menu is the AREA's developable benches
     # (producing TVD control within a buffer), not just what physically overlaps the
     # unit — e.g. WCA with plenty of nearby PDP but no well crossing this parcel.
@@ -53,7 +55,7 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
             note=b.note)
 
     return InventoryResponse(
-        well_count=len(wells),
+        well_count=len(unit_wells),
         geojson=scenario_geojson(parcel, None, wells),
         gunbarrel=gunbarrel_data(wells),
         benches=[_bm(b) for b in benches],

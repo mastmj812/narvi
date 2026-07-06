@@ -30,12 +30,13 @@ const windowLine: LineLayerSpecification = {
   paint: { "line-color": "#2563eb", "line-width": 1, "line-dasharray": [2, 2], "line-opacity": 0.7 },
 };
 
-// existing producers — context: colored but muted/thin
+// existing producers — muted/thin; near-parcel context (not in the unit) dimmer still
 const legPdp: LineLayerSpecification = {
   id: "scenario-leg-pdp", type: "line", source: SCENARIO_SOURCE,
   filter: ["all", ["==", ["get", "kind"], "leg"], ["==", ["get", "category"], "pdp"]],
   paint: {
-    "line-color": color, "line-opacity": 0.45,
+    "line-color": color,
+    "line-opacity": ["case", ["==", ["get", "context"], true], 0.22, 0.45],
     "line-width": ["interpolate", ["linear"], ["zoom"], 9, 1.5, 14, 3],
   },
 };
@@ -70,3 +71,7 @@ const turnLine: LineLayerSpecification = {
 export const SCENARIO_LAYERS = [
   parcelFill, parcelLine, windowLine, legPdp, legRes, legPlan, turnLine,
 ];
+
+// Leg layers that carry a clickable `well_name` — used for map click-to-cull and
+// cursor affordance. (turn arcs are dropped alongside their well via well_name.)
+export const LEG_LAYER_IDS = [legPdp.id, legPlan.id, legRes.id];

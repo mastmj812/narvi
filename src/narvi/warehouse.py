@@ -37,6 +37,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
 
 from .parcel import WORK_EPSG
+from .placement import cross_axis, gunbarrel_offset_ft
 from .records import FT_PER_M, InventoryWell, Leg, Zone
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
@@ -106,13 +107,23 @@ def _db_kwargs() -> dict[str, str]:
     }
 
 
-def get_connection() -> psycopg.Connection:
-    """Open a psycopg (v3) connection with Supabase-friendly session settings."""
-    conn = psycopg.connect(**_db_kwargs())
+def db_conninfo() -> str:
+    """psycopg conninfo string for building a ConnectionPool (backend/app/db.py)."""
+    return psycopg.conninfo.make_conninfo(**_db_kwargs())
+
+
+def apply_session_settings(conn: psycopg.Connection) -> None:
+    """Supabase-friendly session settings; pool `configure` hook + get_connection."""
     with conn.cursor() as cur:
         for stmt in _SESSION_SETTINGS:
             cur.execute(stmt)
     conn.commit()
+
+
+def get_connection() -> psycopg.Connection:
+    """Open a psycopg (v3) connection with Supabase-friendly session settings."""
+    conn = psycopg.connect(**_db_kwargs())
+    apply_session_settings(conn)
     return conn
 
 
@@ -421,17 +432,22 @@ def available_benches(
     benches: dict[str, BenchInfo] = {}
 
     with conn.cursor() as cur:
-        # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox
+        # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox. PUDs pass
+        # the SAME reconciliation filter as _STICK_SQL (realized ones are already
+        # drilled) so the bench menu counts match what the map/gun-barrel shows.
         cur.execute(
             """
             SELECT ifb.formation_blueox AS fb, il.category, COUNT(*) AS n,
                    percentile_cont(0.5) WITHIN GROUP (ORDER BY il.tvd) AS med_tvd
             FROM curated.intel_locations il
             JOIN curated.intel_formation_blueox ifb USING (stick_id)
+            LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
             WHERE il.wellstick_geom IS NOT NULL
               AND ifb.formation_blueox IS NOT NULL
               AND ST_DWithin(il.wellstick_geom::geography,
                              ST_GeogFromText(%(aoi)s), %(buf)s)
+              AND (il.category <> 'PUD' OR ri.status IS NULL
+                   OR ri.status IN ('remaining_pud', 'conflict'))
             GROUP BY 1, 2
             """,
             {"aoi": aoi, "buf": buf_m},
@@ -471,27 +487,28 @@ def available_benches(
         # cross-section axis (perpendicular to the grid azimuth) and take the
         # median gap between distinct rows. Robust to near-duplicate/stacked
         # sticks (same lateral as PUD+RES, report versions), which a raw nearest-
-        # neighbor distance double-counts as ~0 ft.
-        az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
-              .azimuth_deg or 0.0)
-        perp = (math.cos(math.radians(az)), -math.sin(math.radians(az)))   # cross axis (E, N)
-        cur.execute(
-            f"""
-            SELECT ifb.formation_blueox AS fb,
-                   ST_X(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS x,
-                   ST_Y(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS y
-            FROM curated.intel_locations il
-            JOIN curated.intel_formation_blueox ifb USING (stick_id)
-            WHERE ifb.formation_blueox IS NOT NULL AND il.wellstick_geom IS NOT NULL
-              AND ST_DWithin(il.wellstick_geom::geography,
-                             ST_GeogFromText(%(aoi)s), %(buf)s)
-            """,
-            {"aoi": aoi, "buf": buf_m},
-        )
+        # neighbor distance double-counts as ~0 ft. No grid azimuth (no offset
+        # laterals) -> skip: projecting on a fake az=0 axis fabricates spacing.
+        az = lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0)).azimuth_deg
         cross: dict[str, list[float]] = {}
-        for fb, x, y in cur.fetchall():
-            if fb in benches and x is not None and y is not None:
-                cross.setdefault(fb, []).append((x * perp[0] + y * perp[1]) * FT_PER_M)
+        if az is not None:
+            perp = cross_axis(az)                      # canonical cross axis (E, N)
+            cur.execute(
+                f"""
+                SELECT ifb.formation_blueox AS fb,
+                       ST_X(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS x,
+                       ST_Y(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS y
+                FROM curated.intel_locations il
+                JOIN curated.intel_formation_blueox ifb USING (stick_id)
+                WHERE ifb.formation_blueox IS NOT NULL AND il.wellstick_geom IS NOT NULL
+                  AND ST_DWithin(il.wellstick_geom::geography,
+                                 ST_GeogFromText(%(aoi)s), %(buf)s)
+                """,
+                {"aoi": aoi, "buf": buf_m},
+            )
+            for fb, x, y in cur.fetchall():
+                if fb in benches and x is not None and y is not None:
+                    cross.setdefault(fb, []).append((x * perp[0] + y * perp[1]) * FT_PER_M)
 
     for fb, vals in cross.items():
         rows = sorted({round(v / 50.0) * 50.0 for v in vals})       # dedup rows to ~50 ft
@@ -516,23 +533,58 @@ def available_benches(
     return out
 
 
-_PDP_SQL = """
+# Producing horizontals only (aligned with the erebor_locations PDP arm): a
+# permit/DUC isn't PDP context. The api10 regex guarantees a stable well_name
+# (culls are keyed on it); ORDER BY makes re-fetches deterministic.
+# Producing-leg geometry: landing point -> BHL when the header carries both, else
+# RECONSTRUCTED from the wellstick — heel = the point `lateral_length_ft` back
+# from the stick's end (work-CRS interpolation), toe = the stick's endpoint.
+# The vendor header drops LP/BHL coords on some wells (e.g. 3 of 6 CALYPSO
+# 29-16-9 producers) whose sticks are fine; requiring LP+BHL silently erased
+# them from the unit inventory (bro_time 1 4-9 showed 4 of 7 producers).
+_PDP_SQL = f"""
+    WITH src AS (
+        SELECT formation_blueox, tvd_ft, lateral_length_ft, api10,
+               landing_point_lon, landing_point_lat, bhl_lon, bhl_lat,
+               ST_LineMerge(wellstick_geom) AS ls,
+               ST_Transform(ST_LineMerge(wellstick_geom), {WORK_EPSG}) AS ls_w
+        FROM curated.wells_enriched
+        WHERE is_horizontal AND formation_blueox IS NOT NULL
+          AND first_production_date IS NOT NULL
+          AND api10 ~ '^[0-9]+$'
+          AND basin_blueox IN ('delaware', 'midland')
+          AND wellstick_geom IS NOT NULL
+          AND ST_DWithin(wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+    ),
+    calc AS (
+        SELECT *,
+               GREATEST(0.0, LEAST(1.0,
+                   1.0 - COALESCE(lateral_length_ft / {FT_PER_M},
+                                  ST_Length(ls_w) * 0.5)
+                         / NULLIF(ST_Length(ls_w), 0.0))) AS heel_frac
+        FROM src
+    )
     SELECT formation_blueox, tvd_ft, lateral_length_ft, api10,
-           landing_point_lon, landing_point_lat, bhl_lon, bhl_lat
-    FROM curated.wells_enriched
-    WHERE is_horizontal AND formation_blueox IS NOT NULL
-      AND landing_point_lon IS NOT NULL AND landing_point_lat IS NOT NULL
-      AND bhl_lon IS NOT NULL AND bhl_lat IS NOT NULL
-      AND wellstick_geom IS NOT NULL
-      AND ST_DWithin(wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+           CASE WHEN landing_point_lon IS NOT NULL AND landing_point_lat IS NOT NULL
+                THEN landing_point_lon
+                ELSE ST_X(ST_Transform(ST_LineInterpolatePoint(ls_w, heel_frac), 4326)) END,
+           CASE WHEN landing_point_lon IS NOT NULL AND landing_point_lat IS NOT NULL
+                THEN landing_point_lat
+                ELSE ST_Y(ST_Transform(ST_LineInterpolatePoint(ls_w, heel_frac), 4326)) END,
+           COALESCE(bhl_lon, ST_X(ST_EndPoint(ls))),
+           COALESCE(bhl_lat, ST_Y(ST_EndPoint(ls)))
+    FROM calc
+    ORDER BY api10
 """
 
 # PUD sticks are filtered through the §6 reconciliation (curated.reconciled_
-# inventory): only genuinely-remaining inventory (remaining_pud) and ambiguous
-# (conflict) are real drillable locations — realized_drift/realized_phantom are
+# inventory): only genuinely-remaining inventory (remaining_pud), ambiguous
+# (conflict), and NOT-YET-RECONCILED (no row — treat as remaining, don't
+# silently drop) are drillable locations — realized_drift/realized_phantom are
 # already drilled, so they're NOT shown. RES isn't reconciled (pass-through).
 _STICK_SQL = """
-    SELECT ifb.formation_blueox, il.tvd, il.unique_id, lower(il.category), ri.status,
+    SELECT il.stick_id, ifb.formation_blueox, il.tvd, il.unique_id,
+           lower(il.category), ri.status,
            ST_X(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
            ST_Y(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
            ST_X(ST_EndPoint(ST_LineMerge(il.wellstick_geom))),
@@ -543,16 +595,19 @@ _STICK_SQL = """
     WHERE il.category = ANY(%(cats)s) AND il.wellstick_geom IS NOT NULL
       AND ifb.formation_blueox IS NOT NULL
       AND ST_DWithin(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
-      AND (il.category = 'RES' OR ri.status IN ('remaining_pud', 'conflict'))
+      AND (il.category = 'RES' OR ri.status IS NULL
+           OR ri.status IN ('remaining_pud', 'conflict'))
+    ORDER BY il.stick_id
 """
 
 
-def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az, n,
-                      recon_status=None):
+def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az,
+                      fallback_name, recon_status=None):
     """Build a single-leg InventoryWell from a warehouse lateral (heel->toe in
     lon/lat). Returns (well, cross_m) where cross_m is the well's work-CRS centroid
-    for the cross-section projection; gunbarrel_x is set by the caller once the
-    set's mean is known."""
+    for the cross-section projection; gunbarrel_x is set by the caller. Names must
+    be STABLE across re-fetches (culls key on well_name), so `fallback_name` is
+    derived from a warehouse key (stick_id), never from list position."""
     hx, hy = _to_work(h_lon, h_lat)
     tx, ty = _to_work(t_lon, t_lat)
     length_ft = math.hypot(tx - hx, ty - hy) * FT_PER_M
@@ -563,7 +618,7 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
         length_ft=round(length_ft, 1), gunbarrel_x_ft=0.0,   # set by caller
     )
     well = InventoryWell(
-        scenario_id="", deal_id="", well_name=str(name or f"{category}-{n}"),
+        scenario_id="", deal_id="", well_name=str(name or fallback_name),
         well_type="single", formation=fb,
         target_tvd_ft=float(tvd) if tvd else 0.0, lateral_azimuth_deg=round(az, 1),
         legs=[leg], turn=None,
@@ -574,26 +629,56 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
     return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
 
 
+def _classify_membership(
+    items: list[tuple[InventoryWell, tuple[float, float]]],
+    parcel: BaseGeometry,
+    min_overlap_frac: float,
+    context_radius_m: float | None,
+) -> tuple[list[tuple[InventoryWell, tuple[float, float]]],
+           list[tuple[InventoryWell, tuple[float, float]]]]:
+    """Split fetched laterals into (kept, context). kept = unit membership: at
+    least `min_overlap_frac` of the leg runs INSIDE the parcel (co-extent overlap,
+    never min-distance) — a long lateral that merely clips the edge on its way to
+    a neighbouring unit is excluded. context = PDP-only laterals that FAIL
+    membership but lie within `context_radius_m` of the parcel: offset background
+    for the gun-barrel/map, never persisted or exported. Pure (no DB) for tests."""
+    kept: list[tuple[InventoryWell, tuple[float, float]]] = []
+    context: list[tuple[InventoryWell, tuple[float, float]]] = []
+    for well, cross in items:
+        leg = well.legs[0]
+        line = LineString([leg.heel_xy, leg.toe_xy])
+        if line.length <= 0:
+            continue
+        if line.intersection(parcel).length / line.length >= min_overlap_frac:
+            kept.append((well, cross))
+        elif (context_radius_m is not None and well.category == "pdp"
+              and line.distance(parcel) <= context_radius_m):
+            context.append((well, cross))
+    return kept, context
+
+
 def inventory_from_warehouse(
     conn: psycopg.Connection,
     parcel: BaseGeometry,
     buffer_ft: float = 1320.0,
     categories: tuple[str, ...] = ("pdp", "pud", "res"),
     min_overlap_frac: float = 0.30,
+    context_radius_ft: float | None = None,
 ) -> list[InventoryWell]:
     """Adopt the EXISTING inventory IN a parcel as InventoryWells — the curate-mode
     baseline. PDP producers (curated.wells_enriched, landing->bottom-hole leg) and
     Novi PUD/RES sticks (curated.intel_locations + intel_formation_blueox) become
-    single-leg wells tagged by `category`. A well belongs to the unit only if at
-    least `min_overlap_frac` of its lateral runs INSIDE the parcel (co-extent
-    overlap, never min-distance) — so a long lateral that merely clips the edge on
-    its way to a neighbouring unit is excluded. gunbarrel_x is the cross-section
-    offset (perpendicular to the grid azimuth), centered on the kept set."""
+    single-leg wells tagged by `category`. Unit membership is co-extent overlap
+    (see _classify_membership); with `context_radius_ft`, near-parcel PDP laterals
+    that fail membership come back flagged `context=True` (visual background only).
+    gunbarrel_x is the CANONICAL cross-section offset — placement.cross_axis(az)
+    from the parcel centroid, the same frame generated wells use, so curate,
+    override and context populations overlay in one gun-barrel."""
     aoi = parcel_to_ewkt_4326(parcel)
-    buf_m = buffer_ft / FT_PER_M
-    az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
+    fetch_ft = max(buffer_ft, context_radius_ft or 0.0)
+    buf_m = fetch_ft / FT_PER_M
+    az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(fetch_ft, 5280.0))
           .azimuth_deg or 0.0)
-    perp = (math.cos(math.radians(az)), -math.sin(math.radians(az)))
     items: list[tuple[InventoryWell, tuple[float, float]]] = []
 
     with conn.cursor() as cur:
@@ -602,33 +687,28 @@ def inventory_from_warehouse(
             for fb, tvd, _ll, api10, hlon, hlat, tlon, tlat in cur.fetchall():
                 if None not in (hlon, hlat, tlon, tlat):
                     items.append(_passthrough_well(fb, tvd, api10, None, "pdp",
-                                                   hlon, hlat, tlon, tlat, az, len(items) + 1))
+                                                   hlon, hlat, tlon, tlat, az,
+                                                   fallback_name=api10))
         stick_cats = [c.upper() for c in categories if c in ("pud", "res")]
         if stick_cats:
             cur.execute(_STICK_SQL, {"aoi": aoi, "buf": buf_m, "cats": stick_cats})
-            for fb, tvd, uid, cat, status, hlon, hlat, tlon, tlat in cur.fetchall():
+            for sid, fb, tvd, uid, cat, status, hlon, hlat, tlon, tlat in cur.fetchall():
                 if None not in (hlon, hlat, tlon, tlat):
                     items.append(_passthrough_well(fb, tvd, uid, uid, cat,
-                                                   hlon, hlat, tlon, tlat, az, len(items) + 1,
+                                                   hlon, hlat, tlon, tlat, az,
+                                                   fallback_name=f"{cat}-{sid}",
                                                    recon_status=status))
 
-    # keep only laterals that substantially overlap the unit (co-extent overlap)
-    kept: list[tuple[InventoryWell, tuple[float, float]]] = []
-    for well, cross in items:
-        leg = well.legs[0]
-        line = LineString([leg.heel_xy, leg.toe_xy])
-        if line.length <= 0:
-            continue
-        if line.intersection(parcel).length / line.length >= min_overlap_frac:
-            kept.append((well, cross))
+    context_m = (context_radius_ft / FT_PER_M) if context_radius_ft else None
+    kept, context = _classify_membership(items, parcel, min_overlap_frac, context_m)
+    for well, _ in context:
+        well.context = True
 
-    if not kept:
-        return []
-    # center the cross-section so the gun-barrel spreads around 0
-    mean_cross = sum(cx * perp[0] + cy * perp[1] for _, (cx, cy) in kept) / len(kept)
-    for well, (cx, cy) in kept:
-        well.legs[0].gunbarrel_x_ft = round((cx * perp[0] + cy * perp[1] - mean_cross) * FT_PER_M, 1)
-    return [w for w, _ in kept]
+    all_items = kept + context
+    origin = (parcel.centroid.x, parcel.centroid.y)
+    for well, cross in all_items:
+        well.legs[0].gunbarrel_x_ft = round(gunbarrel_offset_ft(cross, az, origin), 1)
+    return [w for w, _ in all_items]
 
 
 def bench_summary(wells: list[InventoryWell]) -> list[BenchInfo]:

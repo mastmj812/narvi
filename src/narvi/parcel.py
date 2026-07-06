@@ -14,8 +14,26 @@ import zipfile
 import shapefile  # pyshp
 from pyproj import CRS, Transformer
 from shapely.geometry import MultiPolygon, Polygon, box, shape
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
 from shapely.ops import unary_union
+from shapely.validation import make_valid
+
+
+def _valid_polygonal(g: BaseGeometry) -> Polygon | MultiPolygon:
+    """Repair an invalid parcel (self-touching rings, bad orientation, slivers —
+    rife in uploaded shapefiles) before any setback/clip op runs on it. An invalid
+    boundary makes shapely's buffer/difference/intersection misbehave and can place
+    a lateral OUTSIDE the unit. Keeps only the polygonal part of the repair."""
+    if g.is_valid:
+        return g
+    fixed = make_valid(g)
+    if isinstance(fixed, (Polygon, MultiPolygon)):
+        return fixed
+    polys = [p for p in getattr(fixed, "geoms", []) if isinstance(p, (Polygon, MultiPolygon))]
+    if not polys:
+        raise ValueError("parcel has no usable polygon area after geometry repair")
+    return unary_union(polys)
 
 WORK_EPSG = 32613  # UTM zone 13N, metres
 
@@ -61,7 +79,7 @@ def load_parcel_zip(data: bytes) -> Polygon | MultiPolygon:
              if sr.shape.__geo_interface__["type"] in ("Polygon", "MultiPolygon")]
     if not polys:
         raise ValueError("Shapefile contains no polygon geometry.")
-    return shp_transform(_transformer(src, WORK_EPSG), unary_union(polys))
+    return _valid_polygonal(shp_transform(_transformer(src, WORK_EPSG), unary_union(polys)))
 
 
 def parcel_from_geojson(geom: dict) -> Polygon | MultiPolygon:
@@ -71,7 +89,7 @@ def parcel_from_geojson(geom: dict) -> Polygon | MultiPolygon:
     g = shape(geom)
     if g.geom_type not in ("Polygon", "MultiPolygon"):
         raise ValueError(f"expected a (Multi)Polygon, got {g.geom_type}")
-    return shp_transform(_transformer(CRS.from_epsg(4326), WORK_EPSG), g)
+    return _valid_polygonal(shp_transform(_transformer(CRS.from_epsg(4326), WORK_EPSG), g))
 
 
 def load_named_parcels(data: bytes) -> dict[str, Polygon | MultiPolygon]:
@@ -96,7 +114,7 @@ def load_named_parcels(data: bytes) -> dict[str, Polygon | MultiPolygon]:
         out[label] = unary_union([out[label], geom]) if label in out else geom
     if not out:
         raise ValueError("Shapefile contains no polygon geometry.")
-    return out
+    return {label: _valid_polygonal(g) for label, g in out.items()}
 
 
 def synthetic_section(side_ft: float = 5280.0,

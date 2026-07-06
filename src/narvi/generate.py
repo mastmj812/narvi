@@ -4,7 +4,9 @@ single: each placed leg is its own well.
 uturn : adjacent legs are paired into U-turns — two parallel legs joined at the
         toe by a semicircular turn of radius R = spacing/2. The turn arc is
         non-producing; it bulges past the toe but is pulled back so it stays
-        inside the window. An odd leftover leg falls back to a single.
+        inside the window. Pairing is chosen by a DP that maximises compliant
+        (>= min_lateral) footage and may skip a leg; an unpaired leg falls back
+        to a single. See _place_uturns.
 """
 
 from __future__ import annotations
@@ -18,8 +20,10 @@ from shapely.geometry.base import BaseGeometry
 from .parcel import WORK_EPSG
 from .placement import (
     FT_PER_M,
+    anchor_edge_azimuth,
     dominant_azimuth,
     drillable_window,
+    gunbarrel_offset_ft,
     laterals_rotated,
     unrotate,
 )
@@ -50,14 +54,20 @@ def _r(xy: tuple[float, float]) -> tuple[float, float]:
     return (round(xy[0], 2), round(xy[1], 2))
 
 
-def _make_leg(y, x0, x1, centroid, phi, y_mid) -> Leg:
+def _make_leg(y, x0, x1, centroid, phi, gb) -> Leg:
+    """gb = (azimuth_deg, origin_xy): the canonical cross-section frame — offsets
+    project the work-CRS leg midpoint onto placement.cross_axis(az) from the
+    parcel centroid, the SAME formula the warehouse pass-through uses, so
+    generated and existing wells overlay in one gun-barrel."""
+    az_deg, origin = gb
     heel = unrotate(x0, y, centroid, phi)
     toe = unrotate(x1, y, centroid, phi)
+    mid = ((heel[0] + toe[0]) / 2.0, (heel[1] + toe[1]) / 2.0)
     return Leg(
         heel_xy=_r(heel), toe_xy=_r(toe),
         heel_lonlat=_wgs(*heel), toe_lonlat=_wgs(*toe),
         length_ft=round((x1 - x0) * FT_PER_M, 1),
-        gunbarrel_x_ft=round((y - y_mid) * FT_PER_M, 1),
+        gunbarrel_x_ft=round(gunbarrel_offset_ft(mid, az_deg, origin), 1),
     )
 
 
@@ -73,7 +83,7 @@ def _single_well(leg: Leg, p: ScenarioParams, n: int) -> InventoryWell:
     )
 
 
-def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n,
+def _uturn_well(la, lb, spacing_m, centroid, phi, gb, p, n,
                 turn_at_high: bool = True) -> InventoryWell | None:
     """Pair two adjacent rows into a U-turn. The semicircular turn sits at ONE end:
     turn_at_high -> the high-x (toe) end, both legs trimmed to the shorter row's far
@@ -88,15 +98,15 @@ def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n,
         common = min(x1a, x1b) - r_m              # turn at the toe (high-x) end
         if common <= x0a or common <= x0b:
             return None
-        legA = _make_leg(ya, x0a, common, centroid, phi, y_mid)
-        legB = _make_leg(yb, x0b, common, centroid, phi, y_mid)
+        legA = _make_leg(ya, x0a, common, centroid, phi, gb)
+        legB = _make_leg(yb, x0b, common, centroid, phi, gb)
         arc_sign = 1.0                            # bulge past the toes (+x)
     else:
         common = max(x0a, x0b) + r_m              # turn at the heel (low-x) end
         if common >= x1a or common >= x1b:
             return None
-        legA = _make_leg(ya, common, x1a, centroid, phi, y_mid)
-        legB = _make_leg(yb, common, x1b, centroid, phi, y_mid)
+        legA = _make_leg(ya, common, x1a, centroid, phi, gb)
+        legB = _make_leg(yb, common, x1b, centroid, phi, gb)
         arc_sign = -1.0                           # bulge past the heels (-x)
 
     cx, cy = common, (ya + yb) / 2.0
@@ -124,21 +134,53 @@ def _uturn_well(la, lb, spacing_m, centroid, phi, y_mid, p, n,
     )
 
 
-def _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, turn_at_high) -> list[InventoryWell]:
-    """Pair adjacent rows into U-turns at the given turn end; an unpaired/too-short
-    leftover falls back to a single."""
+def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high) -> list[InventoryWell]:
+    """Pair legs into U-turns to MAXIMISE total compliant (>= min_lateral) completed
+    footage, via a left-to-right DP that may SKIP a leg (leave it unpaired) when
+    pairing it would orphan a more valuable neighbour. A U-turn joins ADJACENT legs
+    only (a pair is always consecutive rows one spacing apart), so the choice is a
+    1-D interval problem: at each leg, pair it with the next or leave it. An unpaired
+    leg falls back to a single (filtered by the caller's min-lateral cut).
+
+    Replaces greedy adjacent pairing — which commits to (0,1)(2,3)... and can bury a
+    profitable asymmetric straddle behind an early sub-minimum pair (e.g. a notch
+    corner: greedy pairs the two short rows together and drops them, where skipping
+    one lets a full row carry the short one over the floor). Ties prefer pairing, so
+    on a regular unit the DP reproduces the greedy layout (trailing leftover single)."""
+    n = len(legs)
+    singles = [_single_well(_make_leg(*legs[i], centroid, phi, gb), p, i + 1) for i in range(n)]
+    pairs: list[InventoryWell | None] = [
+        _uturn_well(legs[i], legs[i + 1], spacing_m, centroid, phi, gb, p, i + 1, turn_at_high)
+        if i + 1 < n else None
+        for i in range(n)
+    ]
+
+    def pair_value(i: int) -> float:
+        w = pairs[i]
+        return w.completed_lateral_ft if w is not None and w.completed_lateral_ft >= p.min_lateral_ft else 0.0
+
+    # best[i] = max compliant U-turn footage from legs[i:]; take[i] = pair leg i with
+    # i+1 (else leave it unpaired). Ties (>=) prefer pairing.
+    best = [0.0] * (n + 2)
+    take = [False] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        skip_v = best[i + 1]                        # leg i unpaired
+        if pairs[i] is not None and pair_value(i) + best[i + 2] >= skip_v:
+            best[i], take[i] = pair_value(i) + best[i + 2], True
+        else:
+            best[i], take[i] = skip_v, False
+
     wells: list[InventoryWell] = []
     i = 0
-    while i < len(legs):
-        if i + 1 < len(legs):
-            w = _uturn_well(legs[i], legs[i + 1], spacing_m, centroid, phi, y_mid,
-                            p, len(wells) + 1, turn_at_high)
-            if w is not None:
-                wells.append(w)
-                i += 2
-                continue
-        wells.append(_single_well(_make_leg(*legs[i], centroid, phi, y_mid), p, len(wells) + 1))
-        i += 1
+    while i < n:
+        if take[i]:
+            wells.append(pairs[i])  # type: ignore[arg-type]
+            i += 2
+        else:
+            wells.append(singles[i])
+            i += 1
+    for k, w in enumerate(wells, 1):
+        w.well_name = f"{p.formation}-{k:02d}"
     return wells
 
 
@@ -151,52 +193,55 @@ def _drill_to_high(drill_from: str, az: float) -> bool:
     return north_is_high if drill_from == "south" else (not north_is_high)
 
 
-def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams,
+def _deal_uturn_orientation(window: BaseGeometry, az: float, p: ScenarioParams, gb,
                             anchor: str = "center") -> bool:
     """Pick ONE turn end for the whole deal (all wells drilled from one surface
     side): place U-turns both ways on the window and return turn_at_high for the
     orientation that drills more total completed footage."""
-    legs, centroid, phi, y_mid = laterals_rotated(window, az, p.spacing_ft, p.spacing_ft, 0.0, anchor)
+    legs, centroid, phi, _ = laterals_rotated(window, az, p.spacing_ft, p.spacing_ft, 0.0, anchor)
     spacing_m = p.spacing_ft / FT_PER_M
-    hi = sum(w.completed_lateral_ft
-             for w in _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, True))
-    lo = sum(w.completed_lateral_ft
-             for w in _place_uturns(legs, spacing_m, centroid, phi, y_mid, p, False))
-    return hi >= lo
+
+    def kept_ft(turn_at_high: bool) -> float:
+        return sum(w.completed_lateral_ft
+                   for w in _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high)
+                   if w.completed_lateral_ft >= p.min_lateral_ft)
+
+    return kept_ft(True) >= kept_ft(False)
 
 
-def _place_for_anchor(window, az, p, row_offset_ft, anchor, uturn, spacing_m):
+def _place_for_anchor(window, az, p, row_offset_ft, anchor, uturn, spacing_m, gb):
     """Place wells for one anchor; returns (wells, dropped). U-turns try both turn
     ends (unless fixed) and keep the better."""
     if uturn:
-        u_legs, centroid, phi, y_mid = laterals_rotated(
+        u_legs, centroid, phi, _ = laterals_rotated(
             window, az, p.spacing_ft, p.spacing_ft, row_offset_ft, anchor)
         turn = p.turn_at_high
         if turn is None and p.drill_from in ("north", "south"):
             turn = _drill_to_high(p.drill_from, az)
         if turn is None:
-            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, e)
+            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, gb, p, e)
                      for e in (True, False)]
-            placed = max(cands, key=lambda ws: round(sum(w.completed_lateral_ft for w in ws), 1))
+            placed = max(cands, key=lambda ws: round(
+                sum(w.completed_lateral_ft for w in ws if w.completed_lateral_ft >= p.min_lateral_ft), 1))
         else:
-            placed = _place_uturns(u_legs, spacing_m, centroid, phi, y_mid, p, turn)
+            placed = _place_uturns(u_legs, spacing_m, centroid, phi, gb, p, turn)
         wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
         for k, w in enumerate(wells, 1):
             w.well_name = f"{p.formation}-{k:02d}"
         return wells, len(placed) - len(wells)
-    legs, centroid, phi, y_mid = laterals_rotated(
+    legs, centroid, phi, _ = laterals_rotated(
         window, az, p.spacing_ft, p.min_lateral_ft, row_offset_ft, anchor)
-    wells = [_single_well(_make_leg(*leg, centroid, phi, y_mid), p, k + 1)
+    wells = [_single_well(_make_leg(*leg, centroid, phi, gb), p, k + 1)
              for k, leg in enumerate(legs)]
     return wells, _dropped_short(window, az, p, row_offset_ft, anchor)
 
 
-def _deal_anchor(window, az, p, uturn, spacing_m) -> str:
+def _deal_anchor(window, az, p, uturn, spacing_m, gb) -> str:
     """Pick where the rows hang for the whole deal: the anchor that drills the most
     completed footage (center on a tie, so a regular unit stays centered)."""
     best_a, best_ft = "center", -1.0
     for a in ("center", "west", "east"):
-        ws, _ = _place_for_anchor(window, az, p, 0.0, a, uturn, spacing_m)
+        ws, _ = _place_for_anchor(window, az, p, 0.0, a, uturn, spacing_m, gb)
         ft = sum(w.completed_lateral_ft for w in ws)
         if ft > best_ft + 1.0:                  # center first -> wins ties
             best_a, best_ft = a, ft
@@ -237,6 +282,13 @@ def _best_azimuth(window: BaseGeometry, p: ScenarioParams) -> float:
 
 
 def _resolve_azimuth(parcel: BaseGeometry, window: BaseGeometry, p: ScenarioParams) -> float:
+    # A stipulated W/E anchor line DEFINES the azimuth: laterals run parallel to that
+    # lease line. This overrides any sourced/long-axis azimuth so the development
+    # stays exactly parallel to the setback (no fractional-degree drift).
+    if p.anchor in ("west", "east"):
+        edge_az = anchor_edge_azimuth(parcel, p.anchor)
+        if edge_az is not None:
+            return edge_az
     if p.azimuth_deg is not None:
         return p.azimuth_deg
     if p.objective == "max_count":
@@ -252,8 +304,10 @@ def generate_scenario(
     ew = p.setback_ew_ft if p.setback_ew_ft is not None else p.setback_ft
     setback_str = f"{ns:.0f}" if abs(ns - ew) < 1e-6 else f"{ns:.0f} NS/{ew:.0f} EW"
     window = drillable_window(parcel, ns, ew)
-    az = _resolve_azimuth(parcel, window, p)
+    az = _resolve_azimuth(parcel, window, p) % 180.0   # axial: fold once, everywhere
     auto = p.azimuth_deg is None
+    # canonical cross-section frame: parcel centroid + folded azimuth (see _make_leg)
+    gb = (az, (parcel.centroid.x, parcel.centroid.y))
     # max_count also optimizes the single-zone row phase (the wine-rack manages its
     # own stagger, so it passes optimize_phase=False).
     if optimize_phase and p.objective == "max_count" and row_offset_ft == 0.0:
@@ -270,11 +324,18 @@ def generate_scenario(
     # centered); west/east anchor the first lateral at that section-line setback,
     # which is how development is actually laid out and which row lands in a cutout.
     anchors = ["center", "west", "east"] if p.anchor == "auto" else [p.anchor]
+    half = p.spacing_ft / 2.0
     wells: list[InventoryWell] = []
     dropped = 0
     best_ft = -1.0
     for a in anchors:
-        cand, cand_dropped = _place_for_anchor(window, az, p, row_offset_ft, a, uturn, spacing_m)
+        # 'center' tries both row phases (a row on the midline vs straddling it) and
+        # keeps the one that packs more — anchoring a row exactly on the midline can
+        # fit one fewer than the equally-centered half-shift (3 vs 4 at 1,200 ft).
+        offs = (row_offset_ft, row_offset_ft + half) if a == "center" else (row_offset_ft,)
+        cand, cand_dropped = max(
+            (_place_for_anchor(window, az, p, o, a, uturn, spacing_m, gb) for o in offs),
+            key=lambda r: round(sum(w.completed_lateral_ft for w in r[0]), 1))
         ft = sum(w.completed_lateral_ft for w in cand)
         if ft > best_ft + 1.0:                      # center first -> wins ties
             wells, dropped, best_ft = cand, cand_dropped, ft
@@ -297,15 +358,6 @@ def generate_scenario(
     return wells, window, feas
 
 
-def _interzone_offset_ft(stagger_ft, spacing_ft, d_tvd_ft, off_a, off_b) -> float:
-    """3-D distance between the nearest legs of two adjacent zones: the wine-rack
-    diagonal sqrt(horizontal^2 + dTVD^2). Horizontal = the row-phase difference
-    folded into [0, spacing/2]."""
-    phase = abs(off_a - off_b) % spacing_ft
-    horiz = min(phase, spacing_ft - phase)
-    return math.hypot(horiz, d_tvd_ft)
-
-
 def generate_wine_rack(
     parcel: BaseGeometry,
     base: ScenarioParams,
@@ -321,17 +373,18 @@ def generate_wine_rack(
     ns = base.setback_ns_ft if base.setback_ns_ft is not None else base.setback_ft
     ew = base.setback_ew_ft if base.setback_ew_ft is not None else base.setback_ft
     window0 = drillable_window(parcel, ns, ew)
-    az = _resolve_azimuth(parcel, window0, base)
+    az = _resolve_azimuth(parcel, window0, base) % 180.0
+    gb = (az, (parcel.centroid.x, parcel.centroid.y))
     u = base.well_type == "uturn" and base.spacing_ft >= base.uturn_min_leg_to_leg_ft
     spacing_m = base.spacing_ft / FT_PER_M
     # Fix the row anchor ONCE for the deal (zones share where development hangs).
     if base.anchor == "auto":
-        base = replace(base, anchor=_deal_anchor(window0, az, base, u, spacing_m))
+        base = replace(base, anchor=_deal_anchor(window0, az, base, u, spacing_m, gb))
     # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
     # side); auto-pick the higher-footage side, evaluated at the chosen anchor.
     # 'north'/'south' -> each zone resolves the same end from drill_from + the az.
     if u and base.drill_from == "auto" and base.turn_at_high is None:
-        base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base, base.anchor))
+        base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base, gb, base.anchor))
     zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
 
     all_wells: list[InventoryWell] = []
@@ -339,18 +392,34 @@ def generate_wine_rack(
     offsets: list[float] = []
     window: BaseGeometry | None = None
     for i, z in enumerate(zs):
-        off = (i % 2) * stagger                       # alternate by depth
+        # per-bench spacing (Novi develops Bone Spring wider than Wolfcamp); the
+        # stagger and offset follow that bench's spacing, falling back to the base.
+        z_spacing = z.spacing_ft if z.spacing_ft else base.spacing_ft
+        off = (i % 2) * (z_spacing / 2.0)             # alternate by depth
         offsets.append(off)
-        p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft, azimuth_deg=az)
+        p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
+                    spacing_ft=z_spacing, azimuth_deg=az)
         wells, window, feas = generate_scenario(parcel, p, row_offset_ft=off, optimize_phase=False)
         all_wells.extend(wells)
         zresults.append(ZoneResult(z.formation, z.target_tvd_ft, off, len(wells), feas.legs))
 
+    # Inter-zone offset from the ACTUAL placed laterals — center max-packing can
+    # converge adjacent benches to the same cross-section, so report the real
+    # nearest-leg 3-D gap (horizontal cross-section delta + dTVD), not the intended
+    # stagger. A small horizontal gap is fine when dTVD separates the benches.
+    zx: dict[tuple, list[float]] = {}
+    for w in all_wells:
+        zx.setdefault((w.formation, w.target_tvd_ft), []).extend(
+            leg.gunbarrel_x_ft for leg in w.legs)
     min_off = float("inf")
     for i in range(len(zs) - 1):
+        xa = zx.get((zs[i].formation, zs[i].target_tvd_ft), [])
+        xb = zx.get((zs[i + 1].formation, zs[i + 1].target_tvd_ft), [])
+        if not xa or not xb:
+            continue
+        horiz = min(abs(a - b) for a in xa for b in xb)
         d_tvd = abs(zs[i].target_tvd_ft - zs[i + 1].target_tvd_ft)
-        min_off = min(min_off, _interzone_offset_ft(stagger, base.spacing_ft, d_tvd,
-                                                    offsets[i], offsets[i + 1]))
+        min_off = min(min_off, math.hypot(horiz, d_tvd))
     finite = min_off != float("inf")
     ok = (not finite) or min_off >= min_interzone_offset_ft
 

@@ -10,19 +10,22 @@ import { Protocol } from "pmtiles";
 import layers from "protomaps-themes-base";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import { filterFC, useStore } from "./store";
-import { SCENARIO_LAYERS, SCENARIO_SOURCE } from "./map/scenarioLayers";
+import { cullFC, filterFC, useStore } from "./store";
+import { LEG_LAYER_IDS, SCENARIO_LAYERS, SCENARIO_SOURCE } from "./map/scenarioLayers";
 import {
   BLOCKS_LAYERS, BLOCKS_SOURCE, BLOCKS_URL,
   SECTIONS_LAYERS, SECTIONS_SOURCE, SECTIONS_URL,
 } from "./map/gridLayers";
+import { PDP_LAYERS, PDP_LAYER_IDS, PDP_SOURCE, pdpTileUrl } from "./map/pdpLayers";
 
 // Grid overlays render UNDER the scenario legs so wells always stay on top.
 const GRID_BEFORE_ID = SCENARIO_LAYERS[0].id;
 
 // Lazy-add a survey-grid overlay on first enable, then flip visibility on
-// subsequent toggles. A missing GeoJSON (404) turns the toggle back off rather
-// than throwing — the overlay is optional.
+// subsequent toggles. ANY fetch failure (404, backend down, proxy error) turns
+// the toggle back off — a checked box with no layers is a lie, and unchecking
+// re-arms the fetch so the next toggle retries.
+const gridFetchInFlight = new Set<string>();
 function syncGridOverlay(
   map: MlMap,
   show: boolean,
@@ -39,19 +42,21 @@ function syncGridOverlay(
   };
   if (!show) { setVis("none"); return; }
   if (map.getSource(source)) { setVis("visible"); return; }
+  if (gridFetchInFlight.has(source)) return;
+  gridFetchInFlight.add(source);
   fetch(url)
     .then((r) => {
-      if (r.status === 404) { onMissing(); return null; }
       if (!r.ok) throw new Error(`${url} → ${r.status}`);
       return r.json();
     })
     .then((data) => {
-      if (!data || map.getSource(source)) return;
+      if (map.getSource(source)) return;
       map.addSource(source, { type: "geojson", data });
       const before = map.getLayer(GRID_BEFORE_ID) ? GRID_BEFORE_ID : undefined;
       for (const layer of layers) map.addLayer(layer, before);
     })
-    .catch((e) => { console.error(e); });
+    .catch((e) => { console.error(e); onMissing(); })
+    .finally(() => { gridFetchInFlight.delete(source); });
 }
 
 function parcelOnly(geom: GeoJSON.Geometry): GeoJSON.FeatureCollection {
@@ -117,19 +122,21 @@ export function MapView() {
   const inventory = useStore((s) => s.inventory);
   const keptBenches = useStore((s) => s.keptBenches);
   const cats = useStore((s) => s.cats);
+  const culledWells = useStore((s) => s.culledWells);
   const result = useStore((s) => s.result);
   const parcel = useStore((s) => s.parcel);
   const showBlocks = useStore((s) => s.showBlocks);
   const showSections = useStore((s) => s.showSections);
+  const showPdpWells = useStore((s) => s.showPdpWells);
 
   const fc = useMemo<GeoJSON.FeatureCollection>(() => {
     if (appMode === "override") {
-      if (result) return result.geojson;
+      if (result) return cullFC(result.geojson, culledWells);
       return parcel ? parcelOnly(parcel.geojson) : EMPTY_FC;
     }
-    if (inventory) return filterFC(inventory.geojson, keptBenches, cats);
+    if (inventory) return filterFC(inventory.geojson, keptBenches, cats, culledWells);
     return parcel ? parcelOnly(parcel.geojson) : EMPTY_FC;
-  }, [appMode, inventory, keptBenches, cats, result, parcel]);
+  }, [appMode, inventory, keptBenches, cats, culledWells, result, parcel]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -147,8 +154,65 @@ export function MapView() {
 
     const setup = () => {
       if (map.getSource(SCENARIO_SOURCE)) return;
+      // basin-wide PDP tiles first -> they render UNDER the scenario/grid layers
+      map.addSource(PDP_SOURCE, {
+        type: "vector", tiles: [pdpTileUrl()], minzoom: 6, maxzoom: 14,
+      });
+      for (const layer of PDP_LAYERS) map.addLayer(layer);
       map.addSource(SCENARIO_SOURCE, { type: "geojson", data: EMPTY_FC });
       for (const layer of SCENARIO_LAYERS) map.addLayer(layer);
+      // hover tooltip — api10 / bench / TVD — on both the basin-wide PDP tiles
+      // and the in-unit scenario legs
+      const tip = new maplibregl.Popup({
+        closeButton: false, closeOnClick: false, maxWidth: "260px", offset: 10,
+      });
+      const tvdTxt = (v: unknown) =>
+        typeof v === "number" && isFinite(v) ? `${Math.round(v).toLocaleString()} ft` : "—";
+      const tipHtml = (name: string, bench: unknown, tvd: unknown, tag?: string) =>
+        `<div class="map-tip"><b>${name}</b><br/>${bench ?? "—"} · TVD ${tvdTxt(tvd)}` +
+        `${tag ? `<br/><span class="map-tip-tag">${tag}</span>` : ""}</div>`;
+      const onPdpTileMove = (e: maplibregl.MapLayerMouseEvent) => {
+        const p = e.features?.[0]?.properties as Record<string, unknown> | undefined;
+        if (!p) return;
+        map.getCanvas().style.cursor = "pointer";
+        tip.setLngLat(e.lngLat)
+          .setHTML(tipHtml(String(p.api10 ?? "PDP"), p.formation_blueox, p.tvd,
+            "click to hide / show in gun-barrel"))
+          .addTo(map);
+      };
+      const hideTip = () => { tip.remove(); map.getCanvas().style.cursor = ""; };
+      // click a PDP stick to de-select / re-select the well in the gun-barrel
+      // (bad-data screening) — a scenario leg under the cursor wins instead,
+      // since its own click handler culls by the same well_name (api10 for PDP)
+      const onPdpClick = (e: maplibregl.MapLayerMouseEvent) => {
+        if (map.queryRenderedFeatures(e.point, { layers: [...LEG_LAYER_IDS] }).length > 0) return;
+        const api10 = e.features?.[0]?.properties?.api10;
+        if (api10 != null) useStore.getState().toggleCull(String(api10));
+      };
+      for (const id of PDP_LAYER_IDS) {
+        map.on("mousemove", id, onPdpTileMove);
+        map.on("mouseleave", id, hideTip);
+        map.on("click", id, onPdpClick);
+      }
+      // click a leg to cull its well (both U-turn legs + the turn arc drop with it)
+      const onLegClick = (e: maplibregl.MapLayerMouseEvent) => {
+        const wn = e.features?.[0]?.properties?.well_name;
+        if (typeof wn === "string") useStore.getState().toggleCull(wn);
+      };
+      const onLegMove = (e: maplibregl.MapLayerMouseEvent) => {
+        const p = e.features?.[0]?.properties as Record<string, unknown> | undefined;
+        if (!p) return;
+        map.getCanvas().style.cursor = "pointer";
+        tip.setLngLat(e.lngLat)
+          .setHTML(tipHtml(String(p.well_name ?? ""), p.formation, p.target_tvd_ft,
+            String(p.category ?? "").toUpperCase()))
+          .addTo(map);
+      };
+      for (const id of LEG_LAYER_IDS) {
+        map.on("click", id, onLegClick);
+        map.on("mousemove", id, onLegMove);
+        map.on("mouseleave", id, hideTip);
+      }
       setReady(true);
     };
     map.on("load", setup);
@@ -192,6 +256,17 @@ export function MapView() {
     syncGridOverlay(mapRef.current, showSections, SECTIONS_SOURCE, SECTIONS_URL, SECTIONS_LAYERS,
       () => useStore.getState().setShowSections(false));
   }, [showSections, ready]);
+
+  // basin-wide PDP tile layer visibility
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const map = mapRef.current;
+    for (const id of PDP_LAYER_IDS) {
+      if (map.getLayer(id)) {
+        map.setLayoutProperty(id, "visibility", showPdpWells ? "visible" : "none");
+      }
+    }
+  }, [showPdpWells, ready]);
 
   return <div ref={containerRef} className="map-root" />;
 }

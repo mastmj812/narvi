@@ -40,9 +40,11 @@ class ScenarioParamsModel(BaseModel):
 class ZoneModel(BaseModel):
     formation: str
     target_tvd_ft: float
+    spacing_ft: float | None = None        # per-bench leg-to-leg; None -> base spacing
 
     def to_narvi(self) -> Zone:
-        return Zone(formation=self.formation, target_tvd_ft=self.target_tvd_ft)
+        return Zone(formation=self.formation, target_tvd_ft=self.target_tvd_ft,
+                    spacing_ft=self.spacing_ft)
 
 
 class GenerateRequest(BaseModel):
@@ -79,8 +81,15 @@ class ParcelsResponse(BaseModel):
 
 class InventoryRequest(BaseModel):
     parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
-    buffer_ft: float = 330.0                    # tight: this unit's inventory
+    # spatial pre-filter before the co-extent membership test; wide so any lateral
+    # overlapping the unit is fetched (membership decides, not the buffer)
+    buffer_ft: float = 5280.0
     categories: list[str] = ["pdp", "pud", "res"]
+    # near-parcel PDP background (context=true wells). Default OFF: the basin-wide
+    # PDP tile layer is the map context, and the gun-barrel is a UNIT cross-section
+    # — offset wells a mile out just clutter it (user feedback, bro_time 1 4-9).
+    # Context wells never persist or export.
+    context_radius_ft: float | None = None
 
 
 class BenchInfoModel(BaseModel):
@@ -106,6 +115,21 @@ class SaveScenarioRequest(BaseModel):
     scenario_id: str
     name: str | None = None
     generate: GenerateRequest                  # regenerated server-side, then persisted
+
+
+class SaveCurateRequest(BaseModel):
+    """Persist a curated Novi-inventory baseline: the existing wells in the parcel,
+    trimmed to the kept benches + active categories (not a generated run)."""
+
+    deal_id: str
+    scenario_id: str
+    name: str | None = None
+    parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
+    kept_benches: list[str]                    # formation_blueox codes kept
+    categories: list[str] = ["pdp", "pud", "res"]   # active categories
+    culled_wells: list[str] = []               # per-well culls (well_name) to drop
+    buffer_ft: float = 5280.0                  # match /parcels/inventory: same fetch,
+                                               # same membership, same saved set
 
 
 class ScenarioSummary(BaseModel):

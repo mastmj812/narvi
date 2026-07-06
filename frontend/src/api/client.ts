@@ -9,6 +9,8 @@ export type Mode = "single" | "winerack";
 export interface Params {
   spacing_ft: number;
   setback_ft: number;
+  setback_ns_ft: number;   // along-leg (toe/heel ends)
+  setback_ew_ft: number;   // across-leg (lateral-side section lines)
   formation: string;
   target_tvd_ft: number;
   well_type: WellType;
@@ -23,7 +25,7 @@ export interface GenerateRequest {
   parcel: GeoJSON.Geometry;
   params: Params;
   mode: Mode;
-  zones?: { formation: string; target_tvd_ft: number }[] | null;
+  zones?: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[] | null;
   formations?: string[] | null;
   source_tvd?: boolean;
   source_azimuth?: boolean;
@@ -35,12 +37,14 @@ export interface GunbarrelData {
   points: {
     well_name: string; formation: string; color: string; well_type: string;
     category: string; novi_wellname: string | null; recon_status: string | null;
+    context?: boolean;               // near-parcel PDP background (not unit inventory)
     offset_ft: number; tvd_ft: number;
   }[];
   links: {
     well_name: string; formation: string; color: string; tvd_ft: number;
     offset_a_ft: number; offset_b_ft: number;
   }[];
+  azimuth_deg?: number | null;       // lateral azimuth -> compass axis end-labels
 }
 
 export interface GenerateResponse {
@@ -80,6 +84,15 @@ export interface InventoryResponse {
 
 export type Category = "pdp" | "pud" | "res";
 
+// summary stamped on a curate save (backend /scenarios/curate) — the filter
+// recipe needed to restore the editable curate state on load
+export interface CurateSummary {
+  mode: "curate";
+  kept_benches: string[];
+  categories: Category[];
+  culled_wells: string[];
+}
+
 export interface ScenarioSummary {
   deal_id: string;
   scenario_id: string;
@@ -113,8 +126,11 @@ export const api = {
 
   syntheticParcel: () => jget<ParcelInfo>("/api/parcels/synthetic"),
 
-  inventory: (parcel: GeoJSON.Geometry, buffer_ft = 330, categories: Category[] = ["pdp", "pud", "res"]) =>
-    jpost<InventoryResponse>("/api/parcels/inventory", { parcel, buffer_ft, categories }),
+  // context_radius_ft null = unit wells only (the PDP tile layer provides map
+  // context; the gun-barrel is a unit cross-section, not a neighborhood one)
+  inventory: (parcel: GeoJSON.Geometry, buffer_ft = 5280, categories: Category[] = ["pdp", "pud", "res"],
+    context_radius_ft: number | null = null) =>
+    jpost<InventoryResponse>("/api/parcels/inventory", { parcel, buffer_ft, categories, context_radius_ft }),
 
   uploadParcels: async (file: File): Promise<{ parcels: ParcelInfo[] }> => {
     const fd = new FormData();
@@ -134,8 +150,22 @@ export const api = {
   saveScenario: (deal_id: string, scenario_id: string, name: string, generate: GenerateRequest) =>
     jpost<{ saved_wells: number }>("/api/scenarios", { deal_id, scenario_id, name, generate }),
 
+  saveCurateScenario: (
+    deal_id: string, scenario_id: string, name: string, parcel: GeoJSON.Geometry,
+    // buffer matches api.inventory's fetch so the saved set is exactly the
+    // curated view (membership is decided by co-extent overlap, not the buffer)
+    kept_benches: string[], categories: Category[], culled_wells: string[] = [], buffer_ft = 5280,
+  ) =>
+    jpost<{ saved_wells: number }>("/api/scenarios/curate", {
+      deal_id, scenario_id, name, parcel, kept_benches, categories, culled_wells, buffer_ft,
+    }),
+
   loadScenario: (deal_id: string, scenario_id: string) =>
-    jget<{ header: Record<string, unknown>; geojson: GeoJSON.FeatureCollection; gunbarrel: GunbarrelData }>(
+    jget<{
+      header: Record<string, unknown> & { summary?: CurateSummary | Record<string, unknown> | null };
+      geojson: GeoJSON.FeatureCollection; gunbarrel: GunbarrelData;
+      parcel: ParcelInfo | null;          // rebuilt from the stored AOI (curate restore)
+    }>(
       `/api/scenarios/${encodeURIComponent(deal_id)}/${encodeURIComponent(scenario_id)}`),
 
   deleteScenario: async (deal_id: string, scenario_id: string) => {

@@ -12,13 +12,24 @@ const CATS: { key: Category; label: string }[] = [
 export function CuratePanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
   const {
-    parcel, parcels, benches, keptBenches, cats, inventory, loading, error,
+    parcel, parcels, benches, keptBenches, cats, inventory, culledWells, loading, error,
     selectParcel, loadSynthetic, uploadParcels, toggleBench, toggleCat,
   } = useStore();
 
-  const keptPud = benches
+  // culled wells are out of the deal, so every count excludes them; distinct
+  // well_names (a U-turn contributes two gunbarrel points but is one well)
+  const culledSet = new Set(culledWells);
+  const culledPts = (inventory?.gunbarrel?.points ?? [])
+    .filter((p) => culledSet.has(p.well_name));
+  const nCulled = (category: string, formation?: string) => new Set(
+    culledPts
+      .filter((p) => p.category === category
+        && (formation ? p.formation === formation : keptBenches.includes(p.formation)))
+      .map((p) => p.well_name)).size;
+
+  const keptPud = Math.max(0, benches
     .filter((b) => keptBenches.includes(b.formation))
-    .reduce((n, b) => n + b.n_pud, 0);
+    .reduce((n, b) => n + b.n_pud, 0) - nCulled("pud"));
 
   return (
     <>
@@ -59,7 +70,10 @@ export function CuratePanel() {
         {benches.map((b) => {
           const kept = keptBenches.includes(b.formation);
           const suspectTvd = b.median_tvd_ft != null && b.median_tvd_ft > 15000;
-          const counts = [b.n_pdp && `${b.n_pdp} PDP`, b.n_pud && `${b.n_pud} PUD`, b.n_res && `${b.n_res} RES`]
+          const nPdp = Math.max(0, b.n_pdp - nCulled("pdp", b.formation));
+          const nPud = Math.max(0, b.n_pud - nCulled("pud", b.formation));
+          const nRes = Math.max(0, b.n_res - nCulled("res", b.formation));
+          const counts = [nPdp && `${nPdp} PDP`, nPud && `${nPud} PUD`, nRes && `${nRes} RES`]
             .filter(Boolean).join(" · ");
           return (
             <div className="scenario-row" key={b.formation} style={{ opacity: kept ? 1 : 0.5 }}>
@@ -81,7 +95,12 @@ export function CuratePanel() {
       {inventory && (
         <div className="summary">
           <div><b>{keptPud}</b> PUD locations in {keptBenches.length} kept benches</div>
-          <div className="note">{inventory.well_count} existing (PDP+PUD+RES) in/around the unit</div>
+          <div className="note">
+            {Math.max(0, inventory.well_count
+              - new Set(culledPts.filter((p) => !p.context).map((p) => p.well_name)).size)}
+            {" "}existing (PDP+PUD+RES) in/around the unit
+            {culledWells.length > 0 && ` · ${culledWells.length} culled`}
+          </div>
         </div>
       )}
     </>

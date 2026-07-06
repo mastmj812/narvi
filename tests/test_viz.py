@@ -24,14 +24,14 @@ def _params(**kw):
 
 def test_scenario_geojson_structure_and_counts():
     parcel = synthetic_section()
-    wells, window, _ = generate_scenario(parcel, _params())  # 5 single laterals
+    wells, window, _ = generate_scenario(parcel, _params())  # 6 single laterals (center max-pack)
     fc = scenario_geojson(parcel, window, wells)
 
     assert fc["type"] == "FeatureCollection"
     kinds = [f["properties"]["kind"] for f in fc["features"]]
     assert kinds.count("parcel") == 1
     assert kinds.count("window") == 1
-    assert kinds.count("leg") == 5      # one LineString per producing leg
+    assert kinds.count("leg") == 6      # one LineString per producing leg
     assert kinds.count("turn") == 0     # singles have no turn
     # the whole thing must be JSON-serializable for a front end
     json.dumps(fc)
@@ -75,6 +75,19 @@ def test_gunbarrel_data_points_links_and_legend():
     assert data["links"] == []
     pt = data["points"][0]
     assert {"well_name", "formation", "color", "offset_ft", "tvd_ft", "well_type"} <= pt.keys()
+
+
+def test_formation_colors_do_not_reindex_on_subset():
+    # a bench keeps its canonical color no matter which well subset is rendered
+    # (save/load round-trips persist a filtered subset; colors must not shift)
+    from narvi.viz import formation_colors
+
+    parcel = synthetic_section()
+    zones = [Zone("WCA_1", 11500), Zone("WCA_2", 11700)]
+    wells, _, _ = generate_wine_rack(parcel, _params(), zones)
+    full = formation_colors(wells)
+    sub = formation_colors([w for w in wells if w.formation == "WCA_2"])
+    assert sub["WCA_2"] == full["WCA_2"]
 
 
 def test_gunbarrel_links_for_uturns():

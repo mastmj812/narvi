@@ -102,6 +102,10 @@ class InventoryWell:
     category: str = "generated"
     novi_wellname: str | None = None   # set for pud/res pass-through
     edited: bool = False               # user-moved (capstone: gun-barrel drag)
+    # near-parcel offset well (PDP outside the unit, within the context radius):
+    # rendered dimmed for gun-barrel/map background, excluded from exports,
+    # persistence and bench counts. Never True for unit-member wells.
+    context: bool = False
     # §6 reconciliation status for PUD pass-through (remaining_pud | conflict);
     # realized_* PUDs are filtered out upstream (already drilled, not inventory).
     recon_status: str | None = None
@@ -125,6 +129,7 @@ class Zone:
 
     formation: str          # formation_blueox code
     target_tvd_ft: float    # median landing TVD (parameter for now; warehouse later)
+    spacing_ft: float | None = None   # per-bench leg-to-leg; None -> use the base spacing
 
 
 @dataclass
@@ -145,6 +150,7 @@ class WineRackReport:
     stagger_ft: float
     # min 3-D distance between legs of any two ADJACENT zones (the wine-rack
     # diagonal): sqrt(horizontal_offset^2 + delta_TVD^2). Flags a frac-hit risk.
-    min_interzone_offset_ft: float
+    # None when no adjacent-zone pair placed (single zone / empty zones).
+    min_interzone_offset_ft: float | None
     min_interzone_offset_ok: bool
     note: str = ""

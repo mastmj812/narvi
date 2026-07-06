@@ -36,6 +36,34 @@ def dominant_azimuth(parcel: BaseGeometry) -> float:
     return math.degrees(math.atan2(x1 - x0, y1 - y0)) % 180.0
 
 
+def anchor_edge_azimuth(parcel: BaseGeometry, anchor: str) -> float | None:
+    """Bearing (deg, 0-180) of the lease line the development hangs off — 'west' or
+    'east'. The user stipulates the line by choosing the anchor; that line DEFINES
+    the azimuth, because laterals are developed parallel to the setback. Deriving the
+    azimuth from the line (instead of a warehouse grid or the bbox long axis) keeps
+    the laterals exactly parallel to the 330 ft setback — no fractional-degree drift,
+    and the anchor edge falls axis-aligned in the work frame so its setback row sits
+    flush on the line. The anchor edge = the longest exterior edge whose outward
+    normal points most in the chosen direction (west = -Easting, east = +Easting)."""
+    want = -1.0 if anchor == "west" else 1.0
+    polys = list(parcel.geoms) if isinstance(parcel, MultiPolygon) else [parcel]
+    best_score, best_az = 0.0, None
+    for poly in polys:
+        poly = orient(poly, 1.0)  # exterior CCW -> outward normal is (dy, -dx)
+        cs = list(poly.exterior.coords)
+        for (ax, ay), (bx, by) in zip(cs, cs[1:]):
+            dx, dy = bx - ax, by - ay
+            seg_len = math.hypot(dx, dy)
+            if seg_len == 0.0:
+                continue
+            nx = dy / seg_len                       # outward-normal Easting component
+            score = seg_len * (want * nx)           # west/east-facing, length-weighted
+            if score > best_score:
+                best_score = score
+                best_az = math.degrees(math.atan2(dx, dy)) % 180.0
+    return best_az
+
+
 def drillable_window(
     parcel: BaseGeometry, setback_ns_ft: float, setback_ew_ft: float | None = None
 ) -> BaseGeometry:
@@ -82,6 +110,40 @@ def _longest_segment(geom: BaseGeometry) -> LineString | None:
     return None
 
 
+def _flush_anchor_y(rot, minx, maxx, miny, maxy, edge_y, into, spacing_m, min_m) -> float:
+    """March inward from a W/E window edge to the first row flush against the FULL
+    boundary. When the edge runs ~parallel to the laterals, a constant-cross-section
+    row at the extreme corner grazes a single point (length ~0), so anchoring there
+    leaves the first real lateral a whole spacing inside the setback line. Step in
+    until the lateral reaches ~90% of the length one spacing further in (the start of
+    the full plateau) and anchor there, so the first leg sits ON the setback line."""
+    def length_at(y: float) -> float:
+        if not (miny - 1.0 <= y <= maxy + 1.0):
+            return 0.0
+        seg = _longest_segment(LineString([(minx - 10.0, y), (maxx + 10.0, y)]).intersection(rot))
+        return seg.length if seg is not None else 0.0
+
+    def on_plateau(y: float) -> bool:
+        L = length_at(y)
+        return L >= min_m and L >= 0.9 * length_at(y + into * spacing_m)
+
+    step = into * spacing_m / 40.0
+    for i in range(40):                       # coarse scan for the first full row
+        y = edge_y + i * step
+        if on_plateau(y):
+            # bisect the bracket [last-not-full, first-full] to land flush ON the
+            # setback line (sub-foot), not on the coarse scan step inside it
+            lo, hi = edge_y + (i - 1) * step, y
+            for _ in range(24):
+                mid = (lo + hi) / 2.0
+                if on_plateau(mid):
+                    hi = mid
+                else:
+                    lo = mid
+            return hi
+    return edge_y                             # nothing qualifies -> fall back to the edge
+
+
 def laterals_rotated(
     window: BaseGeometry,
     azimuth_deg: float,
@@ -117,7 +179,11 @@ def laterals_rotated(
         e_lo = rotate(Point(xmid, miny), phi, origin=centroid, use_radians=False).x
         e_hi = rotate(Point(xmid, maxy), phi, origin=centroid, use_radians=False).x
         west_y, east_y = (miny, maxy) if e_lo <= e_hi else (maxy, miny)
-        anchor_y = west_y if anchor == "west" else east_y
+        edge_y = west_y if anchor == "west" else east_y
+        # anchor the first lateral flush ON the setback line (the window's W/E edge),
+        # stepping past a degenerate corner graze when that edge ~parallels the grid.
+        into = 1.0 if edge_y == miny else -1.0
+        anchor_y = _flush_anchor_y(rot, minx, maxx, miny, maxy, edge_y, into, spacing_m, min_m)
 
     # rows at anchor + offset + k*spacing, k chosen to span the whole window
     base = anchor_y + row_offset_ft / FT_PER_M
@@ -140,3 +206,24 @@ def unrotate(x: float, y: float, centroid: Point, phi: float) -> tuple[float, fl
     """Map a rotated-frame point back to the work CRS."""
     p = rotate(Point(x, y), phi, origin=centroid, use_radians=False)
     return (p.x, p.y)
+
+
+def cross_axis(azimuth_deg: float) -> tuple[float, float]:
+    """THE canonical gun-barrel cross-section axis (unit vector, work-CRS E/N).
+    The azimuth is folded to [0,180) (axial — a lateral has no direction); the
+    axis is 90° clockwise of it, so +offset = the right-hand side looking down
+    the folded azimuth: compass EAST for N-S laterals, compass SOUTH for E-W.
+    Every gunbarrel_x_ft in narvi (generated wells AND warehouse pass-throughs)
+    projects onto this axis so the two populations overlay correctly."""
+    a = math.radians(azimuth_deg % 180.0)
+    return (math.cos(a), -math.sin(a))
+
+
+def gunbarrel_offset_ft(
+    xy: tuple[float, float], azimuth_deg: float, origin_xy: tuple[float, float]
+) -> float:
+    """Signed cross-section offset (ft) of a work-CRS point from `origin_xy`
+    along cross_axis(azimuth_deg). The origin is the PARCEL centroid — a fixed
+    landmark shared by generated and warehouse wells, so overlays align."""
+    px, py = cross_axis(azimuth_deg)
+    return ((xy[0] - origin_xy[0]) * px + (xy[1] - origin_xy[1]) * py) * FT_PER_M

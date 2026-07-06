@@ -7,13 +7,35 @@ narvi library; these endpoints are adapters.
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from app import __version__
-from app.api import basemap, generate, health, parcels, scenarios, warehouse
+from narvi import persist
 
-app = FastAPI(title="narvi API", version=__version__)
+from app import __version__, db
+from app.api import basemap, generate, health, parcels, scenarios, tiles, warehouse
+
+logger = logging.getLogger("narvi")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        pool = db.open_pool()
+        with pool.connection() as conn:
+            persist.apply_schema(conn)  # once at boot, not per /scenarios request
+    except Exception:
+        # DB-free start still serves /generate, basemap, parcels/upload
+        logger.exception("warehouse pool/apply_schema at startup failed")
+    yield
+    db.close_pool()
+
+
+app = FastAPI(title="narvi API", version=__version__, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,9 +47,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(ValueError)
+async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse:
+    # bad parcels / params raise ValueError deep in the engine; that's client input
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 app.include_router(health.router, prefix="/api")
 app.include_router(basemap.router, prefix="/api")
 app.include_router(parcels.router, prefix="/api")
 app.include_router(generate.router, prefix="/api")
 app.include_router(warehouse.router, prefix="/api")
 app.include_router(scenarios.router, prefix="/api")
+app.include_router(tiles.router, prefix="/api")

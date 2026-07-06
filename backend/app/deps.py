@@ -1,9 +1,9 @@
 """FastAPI dependencies — the warehouse connection.
 
-narvi.warehouse.get_connection() reads the gitignored .env (DB_* keys) and applies
-the Supabase session settings; the backend reuses it rather than standing up a
-second DB mechanism. Endpoints that touch the warehouse depend on `get_conn`;
-pure generation (no DB) doesn't.
+Connections come from the shared pool (app/db.py), opened by the lifespan in
+main.py. `pool.connection()` commits on clean exit and rolls back on error;
+persist.py's explicit commits are unaffected. Endpoints that touch the
+warehouse depend on `get_conn`; pure generation (no DB) doesn't.
 """
 
 from __future__ import annotations
@@ -11,12 +11,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import psycopg
-from narvi.warehouse import get_connection
+
+from . import db
 
 
 def get_conn() -> Iterator[psycopg.Connection]:
-    conn = get_connection()
-    try:
+    pool = db.pool if db.pool is not None else db.open_pool()
+    with pool.connection() as conn:
         yield conn
-    finally:
-        conn.close()
