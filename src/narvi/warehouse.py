@@ -494,6 +494,11 @@ def available_benches(
         # sticks (same lateral as PUD+RES, report versions), which a raw nearest-
         # neighbor distance double-counts as ~0 ft. No grid azimuth (no offset
         # laterals) -> skip: projecting on a fake az=0 axis fabricates spacing.
+        # IN-UNIT sticks only (the same >=30% co-extent membership the inventory
+        # uses): Novi's predicted DSUs rarely line up with the deal's unit, so
+        # end-to-end pads from adjacent Novi DSUs sit laterally shifted — their
+        # rows interleave on the cross axis and fabricate tight gaps (broTime
+        # 20-35 BS1_S read ~550 ft where the in-unit pattern is ~1,300).
         az = lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0)).azimuth_deg
         cross: dict[str, list[float]] = {}
         if az is not None:
@@ -505,9 +510,15 @@ def available_benches(
                        ST_Y(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS y
                 FROM curated.intel_locations il
                 JOIN curated.intel_formation_blueox ifb USING (stick_id)
+                LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
                 WHERE ifb.formation_blueox IS NOT NULL AND il.wellstick_geom IS NOT NULL
                   AND ST_DWithin(il.wellstick_geom::geography,
                                  ST_GeogFromText(%(aoi)s), %(buf)s)
+                  AND ST_Length(il.wellstick_geom) > 0
+                  AND ST_Length(ST_Intersection(il.wellstick_geom, ST_GeomFromEWKT(%(aoi)s)))
+                      >= 0.30 * ST_Length(il.wellstick_geom)
+                  AND (il.category <> 'PUD' OR ri.status IS NULL
+                       OR ri.status IN ('remaining_pud', 'conflict'))
                 """,
                 {"aoi": aoi, "buf": buf_m},
             )
