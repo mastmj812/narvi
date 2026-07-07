@@ -1,0 +1,49 @@
+# CI: backend pytest (geometry engine + FastAPI TestClient smoke) and the
+# frontend typecheck on every push/PR. The suite is DB-free — it must NEVER
+# hit Supabase — so it runs anywhere, fast. Mirrors the anduin
+# (permian_type_curve) ci.yml pattern.
+#
+# No `npm test` step: the frontend has no unit-test script yet — typecheck is
+# the frontend gate. No eslint here, same policy as anduin.
+name: ci
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            backend/pyproject.toml
+      # Install the narvi geometry engine (src/narvi, editable) FIRST so the
+      # backend's `narvi` dependency resolves locally instead of from PyPI,
+      # then the FastAPI backend with its test extras (pytest + httpx).
+      - run: pip install -e ".[dev]"
+      - run: pip install -e "./backend[dev]"
+      # Run from the repo root so both tests/ (engine) and backend/tests/
+      # (API smoke) are collected (38 tests today).
+      - run: pytest -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
