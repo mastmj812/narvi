@@ -1,11 +1,26 @@
 import { useEffect, useState } from "react";
 import { exportFC, useStore } from "../store";
-import { exportGeoJSON, exportWellCSV } from "../export";
+import { exportGeoJSON, exportWellCSV, exportBundleCSV, exportBundleGeoJSON, type BundleItem } from "../export";
+import { api, type ScenarioSummary } from "../api/client";
 
 export function ScenarioBar() {
   const { scenarios, parcel, result, inventory, culledWells, loaded,
     refreshScenarios, save, load, remove, toggleCull, restoreAllCulled } = useStore();
   const [name, setName] = useState("");
+  // deal bundle: ad-hoc multi-select of saved scenarios -> one CSV + one GeoJSON,
+  // each record tagged with its source scenario name (the DSU/section label).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bundleName, setBundleName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scenKey = (s: ScenarioSummary) => `${s.deal_id}/${s.scenario_id}`;
+  const dsuLabel = (s: ScenarioSummary) => s.name?.trim() || s.deal_id;
+
+  const toggleSelect = (key: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
 
   // friendlier display name for a culled well (Novi wellname when we have it);
   // the cull itself keys on well_name
@@ -37,6 +52,34 @@ export function ScenarioBar() {
       .replace(/[\\/:*?"<>|]+/g, "_");
     if (fmt === "geojson") exportGeoJSON(fc, `${base}.geojson`);
     else exportWellCSV(fc, `${base}.csv`);
+  };
+
+  // load each ticked scenario's persisted FC, tag records with its DSU (scenario
+  // name), and download one combined CSV + one combined GeoJSON for the deal.
+  const doBundleExport = async () => {
+    const sel = scenarios.filter((s) => selected.has(scenKey(s)));
+    if (sel.length === 0) return;
+    setBusy(true);
+    try {
+      const items: BundleItem[] = [];
+      let failed = 0;
+      for (const s of sel) {
+        try {
+          const { geojson } = await api.loadScenario(s.deal_id, s.scenario_id);
+          items.push({ dsu: dsuLabel(s), fc: geojson });
+        } catch {
+          failed += 1;
+        }
+      }
+      if (items.length === 0) { alert("Bundle export failed: no scenarios could be loaded."); return; }
+      const today = new Date().toISOString().slice(0, 10);
+      const base = (bundleName.trim() || "deal_bundle").replace(/[\\/:*?"<>|]+/g, "_");
+      exportBundleCSV(items, `${base}_${today}.csv`);
+      exportBundleGeoJSON(items, `${base}_${today}.geojson`);
+      if (failed > 0) alert(`Exported ${items.length} of ${sel.length} scenarios (${failed} failed to load).`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -86,18 +129,46 @@ export function ScenarioBar() {
         </div>
       )}
 
+      {scenarios.length > 0 && (
+        <div className="row" style={{ marginTop: 10, alignItems: "center" }}>
+          <input
+            type="text" placeholder="deal name…" value={bundleName}
+            onChange={(e) => setBundleName(e.target.value)}
+            style={{ flex: 2, padding: "4px 6px", border: "1px solid var(--line)", borderRadius: 5 }}
+          />
+          <button className="ghost" disabled={selected.size === 0 || busy} onClick={doBundleExport}>
+            {busy ? "…" : `⬇ Bundle (${selected.size})`}
+          </button>
+          {selected.size > 0 && (
+            <button
+              onClick={() => setSelected(new Set())}
+              style={{ background: "none", border: 0, padding: 0, color: "var(--accent, #2563eb)",
+                cursor: "pointer", textDecoration: "underline", font: "inherit" }}
+            >
+              clear
+            </button>
+          )}
+        </div>
+      )}
+
       <div style={{ marginTop: 8 }}>
         {scenarios.length === 0 && <div className="note">no saved scenarios</div>}
         {scenarios.map((s) => {
+          const key = `${s.deal_id}/${s.scenario_id}`;
           const isLoaded = loaded?.deal_id === s.deal_id && loaded?.scenario_id === s.scenario_id;
           return (
             <div
-              className="scenario-row" key={`${s.deal_id}/${s.scenario_id}`}
+              className="scenario-row" key={key}
               style={isLoaded
                 ? { background: "var(--accent-soft, #eef2ff)", borderRadius: 5, padding: "2px 4px" }
                 : undefined}
             >
-              <div>
+              <input
+                type="checkbox" title="add to deal bundle"
+                checked={selected.has(key)} onChange={() => toggleSelect(key)}
+                style={{ marginRight: 6, flex: "0 0 auto" }}
+              />
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontWeight: isLoaded ? 600 : 400 }}>
                   {s.name ?? s.deal_id}
                   {isLoaded && <span style={{ color: "var(--accent, #2563eb)", fontSize: 10 }}> · loaded</span>}
