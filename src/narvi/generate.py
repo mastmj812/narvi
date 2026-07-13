@@ -298,13 +298,18 @@ def _resolve_azimuth(parcel: BaseGeometry, window: BaseGeometry, p: ScenarioPara
 
 def generate_scenario(
     parcel: BaseGeometry, p: ScenarioParams, row_offset_ft: float = 0.0,
-    optimize_phase: bool = True,
+    optimize_phase: bool = True, force_azimuth: float | None = None,
 ) -> tuple[list[InventoryWell], BaseGeometry, Feasibility]:
     ns = p.setback_ns_ft if p.setback_ns_ft is not None else p.setback_ft
     ew = p.setback_ew_ft if p.setback_ew_ft is not None else p.setback_ft
     setback_str = f"{ns:.0f}" if abs(ns - ew) < 1e-6 else f"{ns:.0f} NS/{ew:.0f} EW"
     window = drillable_window(parcel, ns, ew)
-    az = _resolve_azimuth(parcel, window, p) % 180.0   # axial: fold once, everywhere
+    # force_azimuth locks the bearing (the wine-rack resolves it ONCE for the deal):
+    # an internally auto-resolved 'west'/'east' anchor then only hangs the rows, it
+    # does NOT re-derive the azimuth from the lease-line edge (that override is only
+    # for a USER-stipulated W/E anchor, which comes through _resolve_azimuth here).
+    az = (force_azimuth if force_azimuth is not None
+          else _resolve_azimuth(parcel, window, p)) % 180.0   # axial: fold once
     auto = p.azimuth_deg is None
     # canonical cross-section frame: parcel centroid + folded azimuth (see _make_leg)
     gb = (az, (parcel.centroid.x, parcel.centroid.y))
@@ -399,7 +404,8 @@ def generate_wine_rack(
         offsets.append(off)
         p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
                     spacing_ft=z_spacing, azimuth_deg=az)
-        wells, window, feas = generate_scenario(parcel, p, row_offset_ft=off, optimize_phase=False)
+        wells, window, feas = generate_scenario(
+            parcel, p, row_offset_ft=off, optimize_phase=False, force_azimuth=az)
         all_wells.extend(wells)
         zresults.append(ZoneResult(z.formation, z.target_tvd_ft, off, len(wells), feas.legs))
 
