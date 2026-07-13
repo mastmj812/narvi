@@ -100,6 +100,7 @@ class BenchInfoModel(BaseModel):
     n_res: int
     suggested_spacing_ft: float | None
     note: str
+    n_supported: int | None = None   # pud/res sticks with offset support (sql/30); null in dev menu
 
 
 class InventoryResponse(BaseModel):

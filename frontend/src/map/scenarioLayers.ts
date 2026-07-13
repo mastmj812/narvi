@@ -3,6 +3,7 @@
 // three categories are separate layers so existing PDP, the PUD plan, and RES
 // read differently. `generated` (override mode) styles like the plan.
 import type {
+  ExpressionSpecification,
   FillLayerSpecification,
   LineLayerSpecification,
 } from "maplibre-gl";
@@ -11,6 +12,26 @@ import { blueoxColorExpression } from "./formations";
 export const SCENARIO_SOURCE = "scenario";
 
 const color = blueoxColorExpression();
+
+// Leg color expressions for the pud/res layers, swapped by MapView on the
+// "Color by PDP support" toggle. FORMATION_COLOR is the default (Blue Ox bench);
+// SUPPORT_COLOR is the offset-support ramp (curated.intel_pdp_support, sql/30):
+// step over pdp_count_3mi (coalesced -1 for generated/unscorable) — gray/red(0)/
+// orange/amber/green, matching erebor. Base opacities: pud 0.95, res 0.5.
+export const FORMATION_COLOR = color;
+export const SUPPORT_COLOR = [
+  "step", ["coalesce", ["get", "pdp_count_3mi"], -1],
+  "#9ca3af",      // < 0  : generated / not scorable
+  0, "#dc2626",   // 0      unsupported
+  1, "#f97316",   // 1-2
+  3, "#f59e0b",   // 3-7
+  8, "#16a34a",   // 8+
+] as unknown as ExpressionSpecification;
+
+// Opacity that de-emphasises unsupported (pdp_count_3mi <= 0) sticks when the
+// support mode is on; `base` restores the layer's default when it's off.
+export const supportOpacity = (base: number): ExpressionSpecification =>
+  (["case", ["<=", ["coalesce", ["get", "pdp_count_3mi"], -1], 0], 0.12, base] as unknown as ExpressionSpecification);
 
 const parcelFill: FillLayerSpecification = {
   id: "scenario-parcel-fill", type: "fill", source: SCENARIO_SOURCE,

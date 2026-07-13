@@ -33,6 +33,24 @@ export function colorForBlueox(code: string | null | undefined): string {
   return MERGED[code] ?? OTHER_COLOR;
 }
 
+// Offset-PDP support ramp (curated.intel_pdp_support, sql/30) — the SVG/JS twin of
+// SUPPORT_COLOR in scenarioLayers.ts, for the gun-barrel. null (generated /
+// unscorable) -> gray, then 0=red / 1-2=orange / 3-7=amber / 8+=green.
+export function colorForSupport(count: number | null | undefined): string {
+  if (count == null) return OTHER_COLOR;
+  if (count === 0) return "#dc2626";
+  if (count <= 2) return "#f97316";
+  if (count <= 7) return "#f59e0b";
+  return "#16a34a";
+}
+export const SUPPORT_LEGEND: { label: string; color: string }[] = [
+  { label: "0", color: "#dc2626" },
+  { label: "1-2", color: "#f97316" },
+  { label: "3-7", color: "#f59e0b" },
+  { label: "8+", color: "#16a34a" },
+  { label: "n/a", color: OTHER_COLOR },
+];
+
 // MapLibre `match` on a formation_blueox property -> color. Scenario legs carry
 // the code as `formation`; the PDP tile layer carries it as `formation_blueox`.
 export function blueoxColorExpression(property = "formation"): ExpressionSpecification {
