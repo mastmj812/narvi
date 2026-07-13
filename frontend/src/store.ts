@@ -66,6 +66,7 @@ export interface BenchRow {
   n_res: number;
   suggested_spacing_ft: number | null;
   hasNovi: boolean;               // any overlapping PUD/RES to adopt
+  n_supported: number | null;     // pud/res sticks with offset support (sql/30); null in dev-only
 }
 
 export function benchRows(s: Pick<State, "benches" | "devBenches">): BenchRow[] {
@@ -75,6 +76,7 @@ export function benchRows(s: Pick<State, "benches" | "devBenches">): BenchRow[] 
       formation: b.formation, median_tvd_ft: b.median_tvd_ft,
       n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
       suggested_spacing_ft: b.suggested_spacing_ft, hasNovi: false,
+      n_supported: null,
     });
   }
   for (const b of s.benches) {
@@ -85,6 +87,7 @@ export function benchRows(s: Pick<State, "benches" | "devBenches">): BenchRow[] 
       n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
       suggested_spacing_ft: dev?.suggested_spacing_ft ?? b.suggested_spacing_ft,
       hasNovi: b.n_pud + b.n_res > 0,
+      n_supported: b.n_supported ?? null,
     });
   }
   return [...map.values()].sort(
@@ -260,6 +263,7 @@ interface State {
   showBlocks: boolean;
   showSections: boolean;
   showPdpWells: boolean;
+  supportColor: boolean;          // color pud/res legs by offset-PDP support (sql/30) + dim unsupported
 
   // gun-barrel: mirror the x-axis (offset sign is canonical +=E/S; the user may
   // prefer the section laid out the other way round)
@@ -293,6 +297,7 @@ interface State {
   setShowBlocks: (v: boolean) => void;
   setShowSections: (v: boolean) => void;
   setShowPdpWells: (v: boolean) => void;
+  setSupportColor: (v: boolean) => void;
   toggleGbFlip: () => void;
 }
 
@@ -332,6 +337,7 @@ export const useStore = create<State>((set, get) => ({
   showBlocks: true,
   showSections: true,
   showPdpWells: true,
+  supportColor: false,
   gbFlip: false,
 
   setParcels: (parcels) => set({ parcels }),
@@ -575,5 +581,6 @@ export const useStore = create<State>((set, get) => ({
   setShowBlocks: (showBlocks) => set({ showBlocks }),
   setShowSections: (showSections) => set({ showSections }),
   setShowPdpWells: (showPdpWells) => set({ showPdpWells }),
+  setSupportColor: (supportColor) => set({ supportColor }),
   toggleGbFlip: () => set((s) => ({ gbFlip: !s.gbFlip })),
 }));

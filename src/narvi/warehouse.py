@@ -417,6 +417,10 @@ class BenchInfo:
     n_res: int                      # Novi RES sticks (resource/edge of fairway)
     suggested_spacing_ft: float | None   # de-facto same-bench lateral spacing
     note: str = ""
+    # pud/res sticks in this bench with offset support (pdp_count_3mi > 0). None
+    # where not computed (the dev-benches menu). Kept after `note` so existing
+    # positional BenchInfo(...) constructions are unaffected.
+    n_supported: int | None = None
 
 
 def available_benches(
@@ -601,6 +605,7 @@ _PDP_SQL = f"""
 _STICK_SQL = """
     SELECT il.stick_id, ifb.formation_blueox, il.tvd, il.unique_id,
            lower(il.category), ri.status,
+           sup.pdp_count_3mi, sup.inflation_ratio,
            ST_X(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
            ST_Y(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
            ST_X(ST_EndPoint(ST_LineMerge(il.wellstick_geom))),
@@ -608,6 +613,7 @@ _STICK_SQL = """
     FROM curated.intel_locations il
     JOIN curated.intel_formation_blueox ifb USING (stick_id)
     LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
+    LEFT JOIN curated.intel_pdp_support sup USING (stick_id)   -- offset-support (sql/30)
     WHERE il.category = ANY(%(cats)s) AND il.wellstick_geom IS NOT NULL
       AND ifb.formation_blueox IS NOT NULL
       AND ST_DWithin(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
@@ -618,7 +624,8 @@ _STICK_SQL = """
 
 
 def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az,
-                      fallback_name, recon_status=None):
+                      fallback_name, recon_status=None, pdp_count_3mi=None,
+                      inflation_ratio=None):
     """Build a single-leg InventoryWell from a warehouse lateral (heel->toe in
     lon/lat). Returns (well, cross_m) where cross_m is the well's work-CRS centroid
     for the cross-section projection; gunbarrel_x is set by the caller. Names must
@@ -641,6 +648,8 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
         completed_lateral_ft=round(length_ft, 1), drilled_lateral_ft=round(length_ft, 1),
         nearest_neighbor_spacing_ft=0.0, setback_ft=0.0,
         category=category, novi_wellname=novi, recon_status=recon_status,
+        pdp_count_3mi=(int(pdp_count_3mi) if pdp_count_3mi is not None else None),
+        inflation_ratio=(float(inflation_ratio) if inflation_ratio is not None else None),
     )
     return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
 
@@ -708,12 +717,13 @@ def inventory_from_warehouse(
         stick_cats = [c.upper() for c in categories if c in ("pud", "res")]
         if stick_cats:
             cur.execute(_STICK_SQL, {"aoi": aoi, "buf": buf_m, "cats": stick_cats})
-            for sid, fb, tvd, uid, cat, status, hlon, hlat, tlon, tlat in cur.fetchall():
+            for sid, fb, tvd, uid, cat, status, pc3, infl, hlon, hlat, tlon, tlat in cur.fetchall():
                 if None not in (hlon, hlat, tlon, tlat):
                     items.append(_passthrough_well(fb, tvd, uid, uid, cat,
                                                    hlon, hlat, tlon, tlat, az,
                                                    fallback_name=f"{cat}-{sid}",
-                                                   recon_status=status))
+                                                   recon_status=status,
+                                                   pdp_count_3mi=pc3, inflation_ratio=infl))
 
     context_m = (context_radius_ft / FT_PER_M) if context_radius_ft else None
     kept, context = _classify_membership(items, parcel, min_overlap_frac, context_m)
@@ -733,17 +743,25 @@ def bench_summary(wells: list[InventoryWell]) -> list[BenchInfo]:
     left None (Novi's pass-through layout is the baseline, nothing to seed)."""
     agg: dict[str, dict] = {}
     for w in wells:
-        d = agg.setdefault(w.formation, {"pdp": 0, "pud": 0, "res": 0, "tvds": []})
+        d = agg.setdefault(w.formation, {"pdp": 0, "pud": 0, "res": 0, "tvds": [], "supported": 0})
         if w.category in ("pdp", "pud", "res"):
             d[w.category] += 1
+        # offset-verified remaining inventory: pud/res sticks with >=1 in-bench
+        # PDP offset within 3 mi (curated.intel_pdp_support). pdp wells aren't scored.
+        if w.category in ("pud", "res") and (w.pdp_count_3mi or 0) > 0:
+            d["supported"] += 1
         if w.target_tvd_ft:
             d["tvds"].append(w.target_tvd_ft)
     out: list[BenchInfo] = []
     for fb, d in agg.items():
         med = round(_median(d["tvds"]), 0) if d["tvds"] else None
+        n_stick = d["pud"] + d["res"]
         srcs = [f"{d[k]} {k.upper()}" for k in ("pdp", "pud", "res") if d[k]]
+        if n_stick:
+            srcs.append(f"{d['supported']}/{n_stick} supp")
         note = (f"{fb} @ {med:,.0f} ft TVD ({', '.join(srcs)})"
                 if med is not None else f"{fb} ({', '.join(srcs)})")
-        out.append(BenchInfo(fb, med, d["pdp"], d["pud"], d["res"], None, note))
+        out.append(BenchInfo(fb, med, d["pdp"], d["pud"], d["res"], None, note,
+                             n_supported=d["supported"]))
     out.sort(key=lambda b: b.median_tvd_ft if b.median_tvd_ft is not None else 1e9)
     return out

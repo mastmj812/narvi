@@ -37,6 +37,8 @@ export interface GunbarrelData {
   points: {
     well_name: string; formation: string; color: string; well_type: string;
     category: string; novi_wellname: string | null; recon_status: string | null;
+    pdp_count_3mi: number | null;    // offset-PDP support (sql/30); null for pdp/generated
+    inflation_ratio: number | null;
     context?: boolean;               // near-parcel PDP background (not unit inventory)
     offset_ft: number; tvd_ft: number;
   }[];
@@ -72,6 +74,7 @@ export interface BenchInfo {
   n_res: number;
   suggested_spacing_ft: number | null;
   note: string;
+  n_supported?: number | null;     // pud/res sticks with offset support (sql/30)
 }
 
 export interface InventoryResponse {
