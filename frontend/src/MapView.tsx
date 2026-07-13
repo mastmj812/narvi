@@ -11,7 +11,14 @@ import layers from "protomaps-themes-base";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import { composeFC, useStore } from "./store";
-import { LEG_LAYER_IDS, SCENARIO_LAYERS, SCENARIO_SOURCE } from "./map/scenarioLayers";
+import {
+  FORMATION_COLOR,
+  LEG_LAYER_IDS,
+  SCENARIO_LAYERS,
+  SCENARIO_SOURCE,
+  SUPPORT_COLOR,
+  supportOpacity,
+} from "./map/scenarioLayers";
 import {
   BLOCKS_LAYERS, BLOCKS_SOURCE, BLOCKS_URL,
   SECTIONS_LAYERS, SECTIONS_SOURCE, SECTIONS_URL,
@@ -127,6 +134,7 @@ export function MapView() {
   const showBlocks = useStore((s) => s.showBlocks);
   const showSections = useStore((s) => s.showSections);
   const showPdpWells = useStore((s) => s.showPdpWells);
+  const supportColor = useStore((s) => s.supportColor);
 
   const fc = useMemo<GeoJSON.FeatureCollection>(() => {
     const composed = composeFC({ inventory, result, benchSource, cats, culledWells });
@@ -164,9 +172,10 @@ export function MapView() {
       });
       const tvdTxt = (v: unknown) =>
         typeof v === "number" && isFinite(v) ? `${Math.round(v).toLocaleString()} ft` : "—";
-      const tipHtml = (name: string, bench: unknown, tvd: unknown, tag?: string) =>
+      const tipHtml = (name: string, bench: unknown, tvd: unknown, tag?: string, extra?: string) =>
         `<div class="map-tip"><b>${name}</b><br/>${bench ?? "—"} · TVD ${tvdTxt(tvd)}` +
-        `${tag ? `<br/><span class="map-tip-tag">${tag}</span>` : ""}</div>`;
+        `${tag ? `<br/><span class="map-tip-tag">${tag}</span>` : ""}` +
+        `${extra ? `<br/>${extra}` : ""}</div>`;
       const onPdpTileMove = (e: maplibregl.MapLayerMouseEvent) => {
         const p = e.features?.[0]?.properties as Record<string, unknown> | undefined;
         if (!p) return;
@@ -199,9 +208,15 @@ export function MapView() {
         const p = e.features?.[0]?.properties as Record<string, unknown> | undefined;
         if (!p) return;
         map.getCanvas().style.cursor = "pointer";
+        // offset-PDP support (curated.intel_pdp_support) — pud/res sticks only
+        const cat = String(p.category ?? "");
+        const sup = (cat === "pud" || cat === "res") && p.pdp_count_3mi != null
+          ? `PDP support: ${p.pdp_count_3mi} @3mi`
+            + (p.inflation_ratio != null ? ` · EUR/ft ${Number(p.inflation_ratio).toFixed(2)}×` : "")
+          : undefined;
         tip.setLngLat(e.lngLat)
           .setHTML(tipHtml(String(p.well_name ?? ""), p.formation, p.target_tvd_ft,
-            String(p.category ?? "").toUpperCase()))
+            cat.toUpperCase(), sup))
           .addTo(map);
       };
       for (const id of LEG_LAYER_IDS) {
@@ -261,6 +276,20 @@ export function MapView() {
       }
     }
   }, [showPdpWells, ready]);
+
+  // "Color by PDP support" (curated.intel_pdp_support, sql/30): recolor the pud/res
+  // legs by the offset-support ramp and de-emphasise unsupported sticks. The pdp
+  // and turn layers are untouched (producing wells aren't scored).
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const map = mapRef.current;
+    const bases: Record<string, number> = { "scenario-leg-plan": 0.95, "scenario-leg-res": 0.5 };
+    for (const [id, base] of Object.entries(bases)) {
+      if (!map.getLayer(id)) continue;
+      map.setPaintProperty(id, "line-color", supportColor ? SUPPORT_COLOR : FORMATION_COLOR);
+      map.setPaintProperty(id, "line-opacity", supportColor ? supportOpacity(base) : base);
+    }
+  }, [supportColor, ready]);
 
   return <div ref={containerRef} className="map-root" />;
 }

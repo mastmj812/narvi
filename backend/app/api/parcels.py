@@ -52,7 +52,7 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
         return BenchInfoModel(
             formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
             n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
-            note=b.note)
+            note=b.note, n_supported=b.n_supported)
 
     return InventoryResponse(
         well_count=len(unit_wells),

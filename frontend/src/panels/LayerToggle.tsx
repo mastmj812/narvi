@@ -7,9 +7,11 @@ export function LayerToggle() {
   const showBlocks = useStore((s) => s.showBlocks);
   const showSections = useStore((s) => s.showSections);
   const showPdpWells = useStore((s) => s.showPdpWells);
+  const supportColor = useStore((s) => s.supportColor);
   const setShowBlocks = useStore((s) => s.setShowBlocks);
   const setShowSections = useStore((s) => s.setShowSections);
   const setShowPdpWells = useStore((s) => s.setShowPdpWells);
+  const setSupportColor = useStore((s) => s.setSupportColor);
 
   return (
     <div className="map-layers">
@@ -17,6 +19,10 @@ export function LayerToggle() {
       <label>
         <input type="checkbox" checked={showPdpWells} onChange={(e) => setShowPdpWells(e.target.checked)} />
         PDP producers
+      </label>
+      <label title="Color remaining PUD/RES by offset-PDP support (0=red…8+=green) and dim unsupported sticks.">
+        <input type="checkbox" checked={supportColor} onChange={(e) => setSupportColor(e.target.checked)} />
+        Color by PDP support
       </label>
       <h3>Survey grid</h3>
       <label>

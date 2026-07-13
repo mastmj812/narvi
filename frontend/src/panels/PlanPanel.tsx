@@ -121,7 +121,10 @@ export function PlanPanel() {
         {rows.map((b) => {
           const src = benchSource[b.formation] ?? "off";
           const ctrl = [b.n_pdp ? `${b.n_pdp} PDP` : null, b.n_pud ? `${b.n_pud} PUD` : null,
-            b.n_res ? `${b.n_res} RES` : null].filter(Boolean).join(" · ") || "no control";
+            b.n_res ? `${b.n_res} RES` : null,
+            (b.n_supported != null && b.n_pud + b.n_res > 0)
+              ? `${b.n_supported}/${b.n_pud + b.n_res} supp` : null,
+          ].filter(Boolean).join(" · ") || "no control";
           const sp = benchSpacing[b.formation] ?? b.suggested_spacing_ft ?? params.spacing_ft;
           return (
             <div key={b.formation} style={{ marginBottom: 4, opacity: src === "off" ? 0.55 : 1 }}>

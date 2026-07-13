@@ -109,6 +109,11 @@ class InventoryWell:
     # §6 reconciliation status for PUD pass-through (remaining_pud | conflict);
     # realized_* PUDs are filtered out upstream (already drilled, not inventory).
     recon_status: str | None = None
+    # Offset-PDP support (curated.intel_pdp_support, sql/30) for pud/res sticks —
+    # verifiability of Novi's forecast, NOT re-persisted (a live warehouse read on
+    # the curate baseline). None for pdp / generated / not-scorable sticks.
+    pdp_count_3mi: int | None = None      # qualifying in-bench PDP offsets within 3 mi
+    inflation_ratio: float | None = None  # Novi PUD EUR/ft vs offset median EUR/ft
 
 
 @dataclass
