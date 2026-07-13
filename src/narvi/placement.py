@@ -64,15 +64,43 @@ def anchor_edge_azimuth(parcel: BaseGeometry, anchor: str) -> float | None:
     return best_az
 
 
+# A drillable-window part below this area is never a real location (it can't host a
+# min-lateral: ~1 ac spans <5 m across). Per-edge strip subtraction on an irregular
+# parcel can leave such a sub-acre shard as a separate MultiPolygon part; harmless as
+# area, but as a part it corrupts the WHOLE-geometry bounds/centroid that
+# laterals_rotated anchors the row phase on — pushing the center rows off the real
+# polygon at a comb of azimuths and collapsing placement to zero (the broTime 11-14
+# 100/330 setback split off a 0.0-ac sliver that did exactly this).
+_MIN_PART_AREA_M2 = 4046.8564224   # 1 acre
+
+
+def _drop_slivers(window: BaseGeometry) -> BaseGeometry:
+    """Drop degenerate sub-acre parts from a (Multi)Polygon window so the whole-
+    geometry bounds/centroid reflect only real drillable area. No-op unless a
+    MultiPolygon has at least one part above the floor; if nothing clears it (setback
+    ate the parcel), the window is returned unchanged so the caller's is_empty /
+    zero-placement path still fires."""
+    if not isinstance(window, MultiPolygon):
+        return window
+    big = [g for g in window.geoms if g.area >= _MIN_PART_AREA_M2]
+    if len(big) == 1:
+        return big[0]
+    if len(big) >= 2:
+        return MultiPolygon(big)
+    return window
+
+
 def drillable_window(
     parcel: BaseGeometry, setback_ns_ft: float, setback_ew_ft: float | None = None
 ) -> BaseGeometry:
     """Inward setback. Uniform (one value, or N/S == E/W) uses a robust negative
-    buffer; asymmetric (N/S vs E/W differ) uses per-edge strip subtraction."""
+    buffer; asymmetric (N/S vs E/W differ) uses per-edge strip subtraction. Either
+    way, degenerate sub-acre parts are dropped so a sliver can't corrupt the row-
+    phase anchoring (see _drop_slivers)."""
     ew = setback_ns_ft if setback_ew_ft is None else setback_ew_ft
     if abs(setback_ns_ft - ew) < 1e-6:
-        return parcel.buffer(-setback_ns_ft / FT_PER_M, join_style=2)
-    return _edge_strip_window(parcel, setback_ns_ft, ew)
+        return _drop_slivers(parcel.buffer(-setback_ns_ft / FT_PER_M, join_style=2))
+    return _drop_slivers(_edge_strip_window(parcel, setback_ns_ft, ew))
 
 
 def _edge_strip_window(parcel: BaseGeometry, setback_ns_ft: float, setback_ew_ft: float) -> BaseGeometry:

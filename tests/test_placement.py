@@ -223,6 +223,61 @@ def _rect_parcel(w_ft, h_ft):
     return scale(sq, xfact=w_ft / 5280.0, yfact=h_ft / 5280.0, origin=sq.centroid)
 
 
+def test_drop_slivers_removes_subacre_parts():
+    from shapely.geometry import MultiPolygon, box
+
+    from narvi.placement import _drop_slivers
+
+    big = box(0.0, 0.0, 1000.0, 1000.0)             # 1e6 m^2 (~247 ac)
+    sliver = box(5000.0, 5000.0, 5000.5, 5000.5)    # 0.25 m^2, far away
+    # one real part + a sliver -> collapses to the real Polygon
+    out = _drop_slivers(MultiPolygon([big, sliver]))
+    assert out.geom_type == "Polygon" and abs(out.area - big.area) < 1.0
+    # two real parts -> kept as a MultiPolygon (a genuinely split window survives)
+    big2 = box(3000.0, 0.0, 4000.0, 1000.0)
+    out2 = _drop_slivers(MultiPolygon([big, big2, sliver]))
+    assert out2.geom_type == "MultiPolygon" and len(out2.geoms) == 2
+    # a plain Polygon passes through untouched
+    assert _drop_slivers(big) is big
+    # nothing above the 1-ac floor -> returned unchanged (no real drillable window,
+    # so the caller's is_empty / zero-placement path still fires downstream)
+    only_slivers = MultiPolygon([sliver, box(1.0, 1.0, 1.2, 1.2)])
+    assert _drop_slivers(only_slivers).geom_type == "MultiPolygon"
+
+
+def test_asymmetric_setback_sliver_does_not_zero_out_generation():
+    # Regression (broTime 11-14): a real DSU whose 100 ft N/S + 330 ft E/W setback
+    # split a 0.0-ac sliver off the drillable window. That sliver corrupted the
+    # whole-geometry bounds/centroid in laterals_rotated, collapsing WCB_2 placement
+    # to ZERO at the deal azimuth (162.5 deg) — even though the geometry robustly
+    # fits several 10,000 ft laterals. Two coupled defects: (1) the sliver had to be
+    # dropped, and (2) the wine-rack's auto-resolved W/E deal anchor must not hijack
+    # the azimuth to the lease-line edge (~161.1 deg, itself a dropout azimuth).
+    from narvi.parcel import parcel_from_geojson
+    from narvi.placement import drillable_window
+
+    aoi = {"type": "Polygon", "coordinates": [[
+        [-103.3556169, 31.8501977], [-103.3394122, 31.8547099],
+        [-103.3288862, 31.8270637], [-103.3450682, 31.8226267],
+        [-103.3556169, 31.8501977]]]}
+    parcel = parcel_from_geojson(aoi)
+
+    win = drillable_window(parcel, 100.0, 330.0)   # asymmetric -> strip subtraction
+    parts = list(win.geoms) if win.geom_type == "MultiPolygon" else [win]
+    assert all(pt.area / 4046.8564224 >= 1.0 for pt in parts)   # no sub-acre shard
+
+    base = ScenarioParams(
+        formation="WCB_2", target_tvd_ft=13000.0, azimuth_deg=162.5,
+        well_type="single", objective="max_lateral", anchor="auto",
+        spacing_ft=1200.0, setback_ft=330.0, setback_ns_ft=100.0,
+        setback_ew_ft=330.0, min_lateral_ft=4000.0)
+    zones = [Zone("WCB_2", 13000.0, spacing_ft=1320.0)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+    assert rep.total_wells == 4                     # was 0 before the fixes
+    # the locked deal azimuth stands; the edge (~161.1 deg) did NOT override it
+    assert all(abs(w.lateral_azimuth_deg - 162.5) < 0.1 for w in wells)
+
+
 def test_objective_max_count_vs_max_lateral():
     parcel = _rect_parcel(10560, 5280)  # 2 mi (E-W) x 1 mi (N-S)
     base = dict(formation="X", target_tvd_ft=1.0, spacing_ft=880, setback_ft=200, min_lateral_ft=4000)
