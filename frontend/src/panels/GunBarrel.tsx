@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GunbarrelData } from "../api/client";
-import { colorForBlueox } from "../map/formations";
+import { colorForBlueox, colorForSupport, SUPPORT_LEGEND } from "../map/formations";
 import { composeGunbarrel, useStore } from "../store";
 
 const M = { l: 46, r: 12, t: 10, b: 22 };
@@ -69,6 +69,10 @@ function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
           {p.recon_status ? row("Status", p.recon_status.replace(/_/g, " ")) : null}
           {row("TVD", `${Math.round(p.tvd_ft).toLocaleString()} ft`)}
           {row("Offset", `${Math.round(p.offset_ft).toLocaleString()} ft`)}
+          {(p.category === "pud" || p.category === "res") && p.pdp_count_3mi != null
+            ? row("PDP support", `${p.pdp_count_3mi} offsets @3mi`) : null}
+          {(p.category === "pud" || p.category === "res") && p.inflation_ratio != null
+            ? row("EUR/ft vs offsets", `${p.inflation_ratio.toFixed(2)}×`) : null}
         </tbody>
       </table>
     </div>
@@ -84,6 +88,7 @@ export function GunBarrel() {
   const toggleCull = useStore((s) => s.toggleCull);
   const gbFlip = useStore((s) => s.gbFlip);
   const toggleGbFlip = useStore((s) => s.toggleGbFlip);
+  const supportColor = useStore((s) => s.supportColor);
   const culledSet = useMemo(() => new Set(culledWells), [culledWells]);
 
   // One composed working set (store.composeGunbarrel): Novi-sourced benches from
@@ -161,6 +166,13 @@ export function GunBarrel() {
     gb.points.filter((p) => p.category === "pdp").map((p) => p.well_name)).size;
   const hasFaded = gb.points.some((p) => p.context && p.category !== "pdp");
 
+  // color = bench (default) or offset-PDP support (shared "Color by PDP support"
+  // toggle). pdp are producing reference wells (not scored) -> stay bench-colored.
+  const colorOf = (p: Pt) =>
+    supportColor && (p.category === "pud" || p.category === "res" || p.category === "generated")
+      ? colorForSupport(p.pdp_count_3mi)
+      : colorForBlueox(p.formation);
+
   return (
     <div className="floatwin gb-win" style={{ left: pos.x, top: pos.y }}>
       <div className="win-head" onMouseDown={onHeadDown}>
@@ -194,7 +206,7 @@ export function GunBarrel() {
           ))}
           {gb.points.map((p, i) => (
             <Marker key={`p${i}`} p={p} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
-              color={colorForBlueox(p.formation)}
+              color={colorOf(p)}
               on={onHover} onToggle={(pt) => toggleCull(pt.well_name)} />
           ))}
           <text x={M.l - 5} y={M.t + 6} textAnchor="end" fontSize={9} fill="#71717a">{minY.toFixed(0)}</text>
@@ -209,14 +221,19 @@ export function GunBarrel() {
         </svg>
       </div>
       <div className="gb-foot">
-        <span>● PDP</span><span>○ planned (PUD / gen)</span><span>△ RES</span><span>· color = bench</span>
+        <span>● PDP</span><span>○ planned (PUD / gen)</span><span>△ RES</span>
+        <span>· color = {supportColor ? "PDP support (offsets @3mi)" : "bench"}</span>
         {hasFaded && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
         {hiddenPdp > 0 && (
           <span style={{ color: "#a1a1aa" }}>· {hiddenPdp} PDP hidden — click its stick on the map to restore</span>
         )}
-        {gb.formations.map((f) => (
-          <span key={f.formation}><i className="swatch" style={{ background: f.color }} />{f.formation}</span>
-        ))}
+        {supportColor
+          ? SUPPORT_LEGEND.map((s) => (
+              <span key={s.label}><i className="swatch" style={{ background: s.color }} />{s.label}</span>
+            ))
+          : gb.formations.map((f) => (
+              <span key={f.formation}><i className="swatch" style={{ background: f.color }} />{f.formation}</span>
+            ))}
       </div>
       {hover && <Tooltip p={hover.p} x={hover.x} y={hover.y} />}
     </div>
