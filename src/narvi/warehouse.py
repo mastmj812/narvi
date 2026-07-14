@@ -563,11 +563,10 @@ def available_benches(
 # 29-16-9 producers) whose sticks are fine; requiring LP+BHL silently erased
 # them from the unit inventory (bro_time 1 4-9 showed 4 of 7 producers).
 _PDP_SQL = f"""
-    WITH src AS (
+    WITH merged AS (
         SELECT formation_blueox, tvd_ft, lateral_length_ft, api10,
                landing_point_lon, landing_point_lat, bhl_lon, bhl_lat,
-               ST_LineMerge(wellstick_geom) AS ls,
-               ST_Transform(ST_LineMerge(wellstick_geom), {WORK_EPSG}) AS ls_w
+               ST_LineMerge(wellstick_geom) AS lm
         FROM curated.wells_enriched
         WHERE is_horizontal AND formation_blueox IS NOT NULL
           AND first_production_date IS NOT NULL
@@ -575,6 +574,18 @@ _PDP_SQL = f"""
           AND basin_blueox IN ('delaware', 'midland')
           AND wellstick_geom IS NOT NULL
           AND ST_DWithin(wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+    ),
+    src AS (
+        -- degenerate vendor sticks (all-identical vertices, zero length) merge to
+        -- an empty GEOMETRYCOLLECTION and ST_LineInterpolatePoint raises on it.
+        -- NULL the line instead of filtering the row: header LP/BHL coords can
+        -- still place the well; only header-less degenerates drop (in Python).
+        SELECT formation_blueox, tvd_ft, lateral_length_ft, api10,
+               landing_point_lon, landing_point_lat, bhl_lon, bhl_lat,
+               CASE WHEN ST_GeometryType(lm) = 'ST_LineString' THEN lm END AS ls,
+               CASE WHEN ST_GeometryType(lm) = 'ST_LineString'
+                    THEN ST_Transform(lm, {WORK_EPSG}) END AS ls_w
+        FROM merged
     ),
     calc AS (
         SELECT *,
