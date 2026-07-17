@@ -373,24 +373,36 @@ def generate_wine_rack(
     """Stack benches into a wine-rack: each zone placed at its TVD, adjacent zones
     phase-shifted by `stagger_ft` (default spacing/2). Vertical separation between
     zones = the difference in their (median) landing TVDs."""
-    stagger = base.spacing_ft / 2.0 if stagger_ft is None else stagger_ft
+    zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
+    # Effective per-zone spacing is what PLACES wells (generate_scenario receives it
+    # per zone); base.spacing_ft is only the fallback for zones without their own.
+    # Every deal-level decision below — the U-turn feasibility gate, the anchor and
+    # turn-end optimizers, the floor note — must therefore run on the zone spacings,
+    # not the deal default: gating on the default reported "-> singles" (and steered
+    # the optimizers with singles) while the zones actually placed U-turns.
+    z_spacings = [z.spacing_ft if z.spacing_ft else base.spacing_ft for z in zs]
+    lead_spacing = z_spacings[0] if z_spacings else base.spacing_ft
+    stagger = lead_spacing / 2.0 if stagger_ft is None else stagger_ft
     # resolve azimuth once so every bench shares it (and any max_count sweep runs once)
     ns = base.setback_ns_ft if base.setback_ns_ft is not None else base.setback_ft
     ew = base.setback_ew_ft if base.setback_ew_ft is not None else base.setback_ft
     window0 = drillable_window(parcel, ns, ew)
     az = _resolve_azimuth(parcel, window0, base) % 180.0
     gb = (az, (parcel.centroid.x, parcel.centroid.y))
-    u = base.well_type == "uturn" and base.spacing_ft >= base.uturn_min_leg_to_leg_ft
-    spacing_m = base.spacing_ft / FT_PER_M
+    # deal-level decisions run at the shallowest zone's spacing (a representative of
+    # what actually places; zones share the resulting anchor/turn end either way)
+    base_eval = replace(base, spacing_ft=lead_spacing)
+    u = base.well_type == "uturn" and lead_spacing >= base.uturn_min_leg_to_leg_ft
+    spacing_m = lead_spacing / FT_PER_M
     # Fix the row anchor ONCE for the deal (zones share where development hangs).
     if base.anchor == "auto":
-        base = replace(base, anchor=_deal_anchor(window0, az, base, u, spacing_m, gb))
+        base = replace(base, anchor=_deal_anchor(window0, az, base_eval, u, spacing_m, gb))
     # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
     # side); auto-pick the higher-footage side, evaluated at the chosen anchor.
     # 'north'/'south' -> each zone resolves the same end from drill_from + the az.
     if u and base.drill_from == "auto" and base.turn_at_high is None:
-        base = replace(base, turn_at_high=_deal_uturn_orientation(window0, az, base, gb, base.anchor))
-    zs = sorted(zones, key=lambda z: z.target_tvd_ft)  # shallow -> deep
+        base = replace(base, turn_at_high=_deal_uturn_orientation(
+            window0, az, replace(base_eval, anchor=base.anchor), gb, base.anchor))
 
     all_wells: list[InventoryWell] = []
     zresults: list[ZoneResult] = []
@@ -432,7 +444,9 @@ def generate_wine_rack(
     total_wells = sum(z.wells for z in zresults)
     total_legs = sum(z.legs for z in zresults)
     well_kind = "uturn" if any(w.turn for w in all_wells) else "single"
-    floored = base.well_type == "uturn" and base.spacing_ft < base.uturn_min_leg_to_leg_ft
+    # flag the floor per ZONE, at the spacing that placed that zone's wells
+    floored_zs = [f"{z.formation} {sp:.0f}" for z, sp in zip(zs, z_spacings)
+                  if base.well_type == "uturn" and sp < base.uturn_min_leg_to_leg_ft]
     report = WineRackReport(
         zones=zresults, total_wells=total_wells, total_legs=total_legs,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in all_wells), 1),
@@ -443,7 +457,7 @@ def generate_wine_rack(
               f"{stagger:.0f} ft; min inter-zone offset "
               f"{('%.0f ft' % min_off) if finite else 'n/a'}"
               + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")
-              + (f"  [U-turn spacing {base.spacing_ft:.0f} < {base.uturn_min_leg_to_leg_ft:.0f} ft "
-                 f"floor -> singles]" if floored else "")),
+              + (f"  [U-turn leg-to-leg < {base.uturn_min_leg_to_leg_ft:.0f} ft floor -> "
+                 f"singles: {', '.join(floored_zs)}]" if floored_zs else "")),
     )
     return all_wells, window, report

@@ -213,8 +213,8 @@ export function PlanPanel() {
           <NumberField
             label="default spacing (ft)" k="spacing_ft" step={10}
             title={"fallback only: seeds a bench's spacing when it has no suggested or per-bench value "
-              + "(each generate bench's own spacing is what places its wells). For U-turns it also "
-              + "gates turn feasibility (leg-to-leg floor) deal-wide."}
+              + "(each generate bench's own spacing is what places its wells and gates its "
+              + "U-turn leg-to-leg floor)."}
           />
           <NumberField
             label="setback N/S (ft)" k="setback_ns_ft" step={10}

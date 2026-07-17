@@ -278,6 +278,28 @@ def test_asymmetric_setback_sliver_does_not_zero_out_generation():
     assert all(abs(w.lateral_azimuth_deg - 162.5) < 0.1 for w in wells)
 
 
+def test_wine_rack_uturn_floor_gates_on_zone_spacing_not_default():
+    # Regression (theCan_44): the deal-level "default spacing" is only a FALLBACK —
+    # a bench's own spacing places its wells. With default 880 (< 990 floor) and the
+    # bench at 1200, the zones placed U-turns while the report claimed
+    # "[U-turn spacing 880 < 990 ft floor -> singles]" — the false failure message
+    # the user acted on. Gate + note must follow the zone spacing.
+    parcel = synthetic_section()
+    base = _params(well_type="uturn", spacing_ft=880, anchor="east")   # default < floor
+    zones = [Zone("WCA_1", 12175, spacing_ft=1200.0)]                  # bench >= floor
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+    assert any(w.well_type == "uturn" for w in wells)
+    assert "floor" not in rep.note                     # no false "-> singles" flag
+    assert rep.stagger_ft == 600                       # zone spacing / 2, not 440
+
+    # and the inverse: default >= floor but the bench BELOW it -> singles, flagged
+    base2 = _params(well_type="uturn", spacing_ft=1200, anchor="east")
+    zones2 = [Zone("WCA_1", 12175, spacing_ft=880.0)]
+    wells2, _, rep2 = generate_wine_rack(parcel, base2, zones2)
+    assert wells2 and all(w.well_type == "single" for w in wells2)
+    assert "floor" in rep2.note and "WCA_1 880" in rep2.note
+
+
 def test_objective_max_count_vs_max_lateral():
     parcel = _rect_parcel(10560, 5280)  # 2 mi (E-W) x 1 mi (N-S)
     base = dict(formation="X", target_tvd_ft=1.0, spacing_ft=880, setback_ft=200, min_lateral_ft=4000)
