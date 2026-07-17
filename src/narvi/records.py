@@ -126,6 +126,10 @@ class Feasibility:
     total_completed_ft: float
     total_drilled_ft: float
     note: str = ""
+    # wells that placed but fell to the min-lateral cut (already narrated in `note`;
+    # carried as a number so aggregators — the wine-rack — can surface WHY a bench
+    # came back short/empty instead of reporting a bare zero)
+    dropped: int = 0
 
 
 @dataclass

@@ -134,7 +134,8 @@ def _uturn_well(la, lb, spacing_m, centroid, phi, gb, p, n,
     )
 
 
-def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high) -> list[InventoryWell]:
+def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high,
+                  anchored_first: bool = False) -> list[InventoryWell]:
     """Pair legs into U-turns to MAXIMISE total compliant (>= min_lateral) completed
     footage, via a left-to-right DP that may SKIP a leg (leave it unpaired) when
     pairing it would orphan a more valuable neighbour. A U-turn joins ADJACENT legs
@@ -146,7 +147,14 @@ def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high) -> list[I
     profitable asymmetric straddle behind an early sub-minimum pair (e.g. a notch
     corner: greedy pairs the two short rows together and drops them, where skipping
     one lets a full row carry the short one over the floor). Ties prefer pairing, so
-    on a regular unit the DP reproduces the greedy layout (trailing leftover single)."""
+    on a regular unit the DP reproduces the greedy layout (trailing leftover single).
+
+    anchored_first: the caller ordered legs from a STIPULATED lease-line anchor. The
+    anchored flush pair is then forced whenever it is compliant — the anchor is a
+    design stipulation, and a raw-footage DP would happily skip the flush row for a
+    few extra feet on a slightly-tapering unit (theCan_44: the east-anchored row was
+    the shortest, so the DP orphaned it and the min-lateral cut deleted it). A
+    sub-minimum anchored pair (notch corner) still falls through to the free DP."""
     n = len(legs)
     singles = [_single_well(_make_leg(*legs[i], centroid, phi, gb), p, i + 1) for i in range(n)]
     pairs: list[InventoryWell | None] = [
@@ -172,6 +180,11 @@ def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high) -> list[I
 
     wells: list[InventoryWell] = []
     i = 0
+    # best/take are suffix-optimal (computed right-to-left), so forcing the anchored
+    # flush pair and resuming the traversal at leg 2 stays optimal for the rest.
+    if anchored_first and n > 1 and pairs[0] is not None and pair_value(0) > 0:
+        wells.append(pairs[0])
+        i = 2
     while i < n:
         if take[i]:
             wells.append(pairs[i])  # type: ignore[arg-type]
@@ -215,16 +228,29 @@ def _place_for_anchor(window, az, p, row_offset_ft, anchor, uturn, spacing_m, gb
     if uturn:
         u_legs, centroid, phi, _ = laterals_rotated(
             window, az, p.spacing_ft, p.spacing_ft, row_offset_ft, anchor)
+        if anchor in ("west", "east") and len(u_legs) > 1:
+            # Pair from the ANCHORED end: the DP's tie-leftover single lands at the
+            # end of the list, so on a uniform unit an odd row count would otherwise
+            # orphan the anchored flush leg whenever that lease line falls at high-y
+            # in the rotated frame — and the min-lateral cut then deletes exactly the
+            # leg the user anchored (theCan_44: east-anchored 990 ft rows kept a
+            # west-hugging pattern). Leftovers belong on the un-anchored side.
+            xm = (min(l[1] for l in u_legs) + max(l[2] for l in u_legs)) / 2.0
+            e_lo = unrotate(xm, u_legs[0][0], centroid, phi)[0]
+            e_hi = unrotate(xm, u_legs[-1][0], centroid, phi)[0]
+            if ((e_lo <= e_hi) and anchor == "east") or ((e_lo > e_hi) and anchor == "west"):
+                u_legs = u_legs[::-1]
+        anchored = anchor in ("west", "east")
         turn = p.turn_at_high
         if turn is None and p.drill_from in ("north", "south"):
             turn = _drill_to_high(p.drill_from, az)
         if turn is None:
-            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, gb, p, e)
+            cands = [_place_uturns(u_legs, spacing_m, centroid, phi, gb, p, e, anchored)
                      for e in (True, False)]
             placed = max(cands, key=lambda ws: round(
                 sum(w.completed_lateral_ft for w in ws if w.completed_lateral_ft >= p.min_lateral_ft), 1))
         else:
-            placed = _place_uturns(u_legs, spacing_m, centroid, phi, gb, p, turn)
+            placed = _place_uturns(u_legs, spacing_m, centroid, phi, gb, p, turn, anchored)
         wells = [w for w in placed if w.completed_lateral_ft >= p.min_lateral_ft]
         for k, w in enumerate(wells, 1):
             w.well_name = f"{p.formation}-{k:02d}"
@@ -332,7 +358,7 @@ def generate_scenario(
     half = p.spacing_ft / 2.0
     wells: list[InventoryWell] = []
     dropped = 0
-    best_ft = -1.0
+    best_ft = None
     for a in anchors:
         # 'center' tries both row phases (a row on the midline vs straddling it) and
         # keeps the one that packs more — anchoring a row exactly on the midline can
@@ -342,14 +368,16 @@ def generate_scenario(
             (_place_for_anchor(window, az, p, o, a, uturn, spacing_m, gb) for o in offs),
             key=lambda r: round(sum(w.completed_lateral_ft for w in r[0]), 1))
         ft = sum(w.completed_lateral_ft for w in cand)
-        if ft > best_ft + 1.0:                      # center first -> wins ties
+        # first candidate always lands (so a fully-filtered run still carries its
+        # dropped count); after that only strictly better -> center wins ties
+        if best_ft is None or ft > best_ft + 1.0:
             wells, dropped, best_ft = cand, cand_dropped, ft
 
     for w in wells:
         w.lateral_azimuth_deg = round(az, 1)
     n_legs = sum(len(w.legs) for w in wells)
     feas = Feasibility(
-        requested=None, placed=len(wells), legs=n_legs,
+        requested=None, placed=len(wells), legs=n_legs, dropped=dropped,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
         total_drilled_ft=round(sum(w.drilled_lateral_ft for w in wells), 1),
         note=(f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
@@ -408,6 +436,7 @@ def generate_wine_rack(
     zresults: list[ZoneResult] = []
     offsets: list[float] = []
     window: BaseGeometry | None = None
+    dropped_total = 0
     for i, z in enumerate(zs):
         # per-bench spacing (Novi develops Bone Spring wider than Wolfcamp); the
         # stagger and offset follow that bench's spacing, falling back to the base.
@@ -419,6 +448,7 @@ def generate_wine_rack(
         wells, window, feas = generate_scenario(
             parcel, p, row_offset_ft=off, optimize_phase=False, force_azimuth=az)
         all_wells.extend(wells)
+        dropped_total += feas.dropped
         zresults.append(ZoneResult(z.formation, z.target_tvd_ft, off, len(wells), feas.legs))
 
     # Inter-zone offset from the ACTUAL placed laterals — center max-packing can
@@ -458,6 +488,8 @@ def generate_wine_rack(
               f"{('%.0f ft' % min_off) if finite else 'n/a'}"
               + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")
               + (f"  [U-turn leg-to-leg < {base.uturn_min_leg_to_leg_ft:.0f} ft floor -> "
-                 f"singles: {', '.join(floored_zs)}]" if floored_zs else "")),
+                 f"singles: {', '.join(floored_zs)}]" if floored_zs else "")
+              + (f"  [{dropped_total} short well{'s' if dropped_total != 1 else ''} "
+                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped]" if dropped_total else "")),
     )
     return all_wells, window, report
