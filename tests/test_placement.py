@@ -278,6 +278,59 @@ def test_asymmetric_setback_sliver_does_not_zero_out_generation():
     assert all(abs(w.lateral_azimuth_deg - 162.5) < 0.1 for w in wells)
 
 
+def test_wine_rack_uturn_floor_gates_on_zone_spacing_not_default():
+    # Regression (theCan_44): the deal-level "default spacing" is only a FALLBACK —
+    # a bench's own spacing places its wells. With default 880 (< 990 floor) and the
+    # bench at 1200, the zones placed U-turns while the report claimed
+    # "[U-turn spacing 880 < 990 ft floor -> singles]" — the false failure message
+    # the user acted on. Gate + note must follow the zone spacing.
+    parcel = synthetic_section()
+    base = _params(well_type="uturn", spacing_ft=880, anchor="east")   # default < floor
+    zones = [Zone("WCA_1", 12175, spacing_ft=1200.0)]                  # bench >= floor
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+    assert any(w.well_type == "uturn" for w in wells)
+    assert "floor" not in rep.note                     # no false "-> singles" flag
+    assert rep.stagger_ft == 600                       # zone spacing / 2, not 440
+
+    # and the inverse: default >= floor but the bench BELOW it -> singles, flagged
+    base2 = _params(well_type="uturn", spacing_ft=1200, anchor="east")
+    zones2 = [Zone("WCA_1", 12175, spacing_ft=880.0)]
+    wells2, _, rep2 = generate_wine_rack(parcel, base2, zones2)
+    assert wells2 and all(w.well_type == "single" for w in wells2)
+    assert "floor" in rep2.note and "WCA_1 880" in rep2.note
+
+
+def test_uturn_east_anchor_leftover_lands_on_far_side():
+    # Regression (theCan_44 @ 990 ft, anchor east, min lateral 9,000): with an odd
+    # row count the pairing DP's tie-leftover single sat at the list end — which on
+    # some parcel orientations is the ANCHORED east end. The min-lateral cut then
+    # deleted exactly the east-flush leg, leaving a west-hugging pattern that looked
+    # like the anchor was ignored. Pairing must start at the anchored end so the
+    # leftover (and any drop) lands on the far side.
+    parcel = synthetic_section()   # 5,280 ft square; window 4,880 after 200 setback
+    wells, _, feas = generate_scenario(parcel, _params(
+        well_type="uturn", spacing_ft=990, anchor="east", min_lateral_ft=8000))
+    # 5 rows -> 2 U-turns (2 x (4880-495) = 8,770 >= 8,000) + 1 single (4,880) dropped
+    assert len(wells) == 2 and all(w.well_type == "uturn" for w in wells)
+    assert feas.dropped == 1
+    gbs = [leg.gunbarrel_x_ft for w in wells for leg in w.legs]
+    # the EAST-flush leg (window half-span 2,440 ft; +offset = east at az 0) is kept;
+    # the dropped leftover is the westmost row
+    assert max(gbs) > 2400
+    assert min(gbs) > -1000                      # west rows -1520/-530: -1520 dropped
+
+
+def test_wine_rack_note_surfaces_min_lateral_drops():
+    # A bench whose wells all fall to the min-lateral cut must say so in the report
+    # note — a bare "0 wells" (theCan_44 @ 1,200 ft with min lateral 9,000, u-turns
+    # completing ~8,980 ft) reads as a generator failure instead of a filter.
+    parcel = synthetic_section()
+    base = _params(well_type="uturn", spacing_ft=1200, anchor="east", min_lateral_ft=9000)
+    wells, _, rep = generate_wine_rack(parcel, base, [Zone("WCA_1", 12175, spacing_ft=1200.0)])
+    assert rep.total_wells == 0
+    assert "min lateral dropped" in rep.note     # explains the zero
+
+
 def test_objective_max_count_vs_max_lateral():
     parcel = _rect_parcel(10560, 5280)  # 2 mi (E-W) x 1 mi (N-S)
     base = dict(formation="X", target_tvd_ft=1.0, spacing_ft=880, setback_ft=200, min_lateral_ft=4000)
