@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { exportFC, useStore } from "../store";
-import { exportGeoJSON, exportWellCSV, exportBundleCSV, exportBundleGeoJSON, type BundleItem } from "../export";
+import {
+  exportGeoJSON, exportWellCSV, exportShapefile,
+  exportBundleCSV, exportBundleGeoJSON, exportBundleShapefile, type BundleItem,
+} from "../export";
 import { api, type ScenarioSummary } from "../api/client";
 
 export function ScenarioBar() {
@@ -44,14 +47,23 @@ export function ScenarioBar() {
   // export the current (post-cull, post-filter, context-stripped) inventory FC as
   // GeoJSON or CSV. filename = the scenario name (typed name > loaded scenario >
   // parcel label), sanitized for the filesystem.
-  const doExport = (fmt: "geojson" | "csv") => {
+  const doExport = async (fmt: "geojson" | "csv" | "shp") => {
     const fc = exportFC(useStore.getState());
     if (!fc) return;
     const today = new Date().toISOString().slice(0, 10);
     const base = (name.trim() || loaded?.name || parcel?.label || today)
       .replace(/[\\/:*?"<>|]+/g, "_");
     if (fmt === "geojson") exportGeoJSON(fc, `${base}.geojson`);
-    else exportWellCSV(fc, `${base}.csv`);
+    else if (fmt === "csv") exportWellCSV(fc, `${base}.csv`);
+    else {
+      // shapefile = backend round-trip; inventory sticks only (no PDP), so a
+      // PDP-only curate view legitimately 400s — surface that, don't swallow it
+      try {
+        await exportShapefile(fc, base);
+      } catch (e) {
+        alert(`Shapefile export failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
   };
 
   // load each ticked scenario's persisted FC, tag records with its DSU (scenario
@@ -76,6 +88,13 @@ export function ScenarioBar() {
       const base = (bundleName.trim() || "deal_bundle").replace(/[\\/:*?"<>|]+/g, "_");
       exportBundleCSV(items, `${base}_${today}.csv`);
       exportBundleGeoJSON(items, `${base}_${today}.geojson`);
+      // shapefile rides along for the GGX handoff; a bundle with zero inventory
+      // sticks (all-PDP curates) 400s — report it but keep the CSV/GeoJSON
+      try {
+        await exportBundleShapefile(items, `${base}_${today}`);
+      } catch (e) {
+        alert(`Bundle shapefile skipped: ${e instanceof Error ? e.message : e}`);
+      }
       if (failed > 0) alert(`Exported ${items.length} of ${sel.length} scenarios (${failed} failed to load).`);
     } finally {
       setBusy(false);
@@ -97,6 +116,12 @@ export function ScenarioBar() {
       <div className="row" style={{ marginTop: 6, alignItems: "center" }}>
         <button className="ghost" disabled={!canExport} onClick={() => doExport("geojson")}>⬇ GeoJSON</button>
         <button className="ghost" disabled={!canExport} onClick={() => doExport("csv")}>⬇ CSV</button>
+        <button
+          className="ghost" disabled={!canExport} onClick={() => doExport("shp")}
+          title="zipped shapefile for GGX — created/generated inventory sticks only, no PDP"
+        >
+          ⬇ SHP
+        </button>
         {culledWells.length > 0 && (
           <span className="note" style={{ marginLeft: "auto", marginTop: 0 }}>
             {culledWells.length} culled ·{" "}

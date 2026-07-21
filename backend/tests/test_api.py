@@ -54,6 +54,53 @@ def test_generate_uturn_has_turns():
     assert len(turns) == 2
 
 
+def test_export_shapefile_inventory_only():
+    # generate a real scenario, then round-trip its FC through the shapefile
+    # endpoint with a PDP leg spliced in — the zip must exclude it
+    gen = client.post("/api/generate", json={
+        "parcel": _synthetic_parcel_geojson(),
+        "params": {"spacing_ft": 880, "setback_ft": 200, "formation": "WCA_1",
+                   "target_tvd_ft": 11500, "azimuth_deg": 0.0, "anchor": "center"},
+        "mode": "single",
+    }).json()
+    fc = gen["geojson"]
+    pdp = {
+        "type": "Feature",
+        "geometry": {"type": "LineString", "coordinates": [[-104.1, 32.0], [-104.1, 32.03]]},
+        "properties": {"kind": "leg", "well_name": "existing_pdp", "category": "pdp"},
+    }
+    fc["features"].append(pdp)
+
+    r = client.post("/api/export/shapefile", json={"geojson": fc, "layer_name": "unit_a"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert 'filename="unit_a.zip"' in r.headers["content-disposition"]
+
+    import io
+    import zipfile
+
+    import shapefile
+
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    assert {"unit_a.shp", "unit_a.shx", "unit_a.dbf", "unit_a.prj", "unit_a.cpg"} <= set(z.namelist())
+    sf = shapefile.Reader(shp=io.BytesIO(z.read("unit_a.shp")),
+                          shx=io.BytesIO(z.read("unit_a.shx")),
+                          dbf=io.BytesIO(z.read("unit_a.dbf")))
+    assert len(sf) == 6  # the 6 generated legs; the spliced PDP leg is excluded
+    assert all(rec["CATEGORY"] == "generated" for rec in sf.records())
+
+
+def test_export_shapefile_pdp_only_is_400():
+    fc = {"type": "FeatureCollection", "features": [{
+        "type": "Feature",
+        "geometry": {"type": "LineString", "coordinates": [[-104.1, 32.0], [-104.1, 32.03]]},
+        "properties": {"kind": "leg", "well_name": "existing_pdp", "category": "pdp"},
+    }]}
+    r = client.post("/api/export/shapefile", json={"geojson": fc})
+    assert r.status_code == 400
+    assert "no inventory sticks" in r.json()["detail"]
+
+
 def test_generate_winerack_requires_zones():
     body = {
         "parcel": _synthetic_parcel_geojson(),
