@@ -372,3 +372,40 @@ def test_wine_rack_uturn_zones_stagger_not_stack():
     assert abs(d - 600) < 1
     # true 3-D nearest-leg gap reported (not zero-horizontal stacking)
     assert rep.min_interzone_offset_ft is not None and rep.min_interzone_offset_ft > 600
+
+
+def test_wine_rack_slack_shift_avoids_boundary_clipped_stick():
+    # Regression (Castaway S2 sec 35, the real tract): a survey tract a few
+    # degrees off the lateral bearing clips the far boundary row short — the
+    # flush anchor only guarantees the ANCHORED row is full; the pattern's far
+    # end landed in the opposite edge's clipped band (two U-turn legs at 3,888 ft
+    # vs 4,388 ft full) while cross-axis slack sat unused. Auto anchor must
+    # slide the whole deal (ONE shared delta — stagger preserved) to full-length
+    # rows; a stipulated anchor stays put.
+    from dataclasses import replace
+
+    from shapely.geometry import Polygon
+
+    parcel = Polygon([  # castaway_2 in the work CRS (UTM 13N, m)
+        (671220.2, 3509056.2), (672717.3, 3509561.9), (672975.5, 3508798.9),
+        (671475.5, 3508296.9), (671220.2, 3509056.2)])
+    base = _params(formation="X", well_type="uturn", spacing_ft=1200,
+                   setback_ft=330, setback_ns_ft=330.0, setback_ew_ft=100.0,
+                   azimuth_deg=71.3, anchor="auto", min_lateral_ft=4000)
+    zones = [Zone("BS3_S", 11364, spacing_ft=1200.0),
+             Zone("WCA_2", 11663, spacing_ft=1200.0),
+             Zone("WCB_1", 12024, spacing_ft=1200.0)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+
+    assert len(wells) == 3 and all(w.well_type == "uturn" for w in wells)
+    # every leg full length (~4,385-4,389 ft); the clipped pair read 3,888 ft
+    min_leg = min(leg.length_ft for w in wells for leg in w.legs)
+    assert min_leg > 4300, f"boundary-clipped leg survived: {min_leg:.0f} ft"
+    assert "slack-shifted" in rep.note
+    # zones still wine-racked (stagger preserved through the shared shift)
+    xs = {w.formation: sorted(round(leg.gunbarrel_x_ft) for leg in w.legs) for w in wells}
+    assert xs["BS3_S"] != xs["WCA_2"]
+
+    # stipulated center anchor: no shift (design intent respected)
+    _, _, rep_c = generate_wine_rack(parcel, replace(base, anchor="center"), zones)
+    assert "slack-shifted" not in rep_c.note

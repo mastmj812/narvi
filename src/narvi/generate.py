@@ -460,6 +460,7 @@ def generate_wine_rack(
     spacing_m = lead_spacing / FT_PER_M
     # Fix the row anchor ONCE for the deal (zones share where development hangs),
     # judged on the zones as they will actually place (spacing + stagger phase).
+    anchor_stipulated = base.anchor != "auto"
     if base.anchor == "auto":
         base = replace(base, anchor=_deal_anchor_zones(window0, az, base, zs, z_spacings, gb))
     # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
@@ -468,6 +469,44 @@ def generate_wine_rack(
     if u and base.drill_from == "auto" and base.turn_at_high is None:
         base = replace(base, turn_at_high=_deal_uturn_orientation(
             window0, az, replace(base_eval, anchor=base.anchor), gb, base.anchor))
+
+    # Cross-axis SLACK SHIFT (auto anchor only): the discrete hangs (flush edge /
+    # center / stagger phase) can park a boundary row on a clipped chord — a short
+    # stick against a non-parallel lease line — while the whole pattern has room to
+    # slide across the unit (Castaway S2: the southern U-turn leg hit the boundary
+    # with ~180 ft of slack to the north). Scan ONE shared delta for the deal (the
+    # relative stagger is preserved) and keep the shift that drills the most total
+    # footage; ties go to no-shift so clean rectangular layouts stay put. A
+    # stipulated W/E/center anchor is a design intent — never shifted.
+    def _zone_wells(i: int, z, sp: float, delta: float):
+        off = (i % 2) * (sp / 2.0) + delta
+        u_i = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+        p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
+                      spacing_ft=sp)
+        return _place_for_anchor(window0, az, p_i, off, base.anchor, u_i,
+                                 sp / FT_PER_M, gb)[0]
+
+    shift = 0.0
+    if not anchor_stipulated and zs:
+        def _total(delta: float) -> float:
+            return sum(w.completed_lateral_ft
+                       for i, (z, sp) in enumerate(zip(zs, z_spacings))
+                       for w in _zone_wells(i, z, sp, delta))
+        period = max(z_spacings)
+        best_ft = _total(0.0)
+        coarse = 25.0
+        d = coarse
+        while d < period:
+            ft = _total(d)
+            if ft > best_ft + 1.0:
+                best_ft, shift = ft, d
+            d += coarse
+        if shift:                                  # refine to ~5 ft around the best
+            lo = max(5.0, shift - coarse)
+            for dd in range(int(lo), int(min(period, shift + coarse)) + 1, 5):
+                ft = _total(float(dd))
+                if ft > best_ft + 0.5:
+                    best_ft, shift = ft, float(dd)
 
     all_wells: list[InventoryWell] = []
     zresults: list[ZoneResult] = []
@@ -478,7 +517,7 @@ def generate_wine_rack(
         # per-bench spacing (Novi develops Bone Spring wider than Wolfcamp); the
         # stagger and offset follow that bench's spacing, falling back to the base.
         z_spacing = z.spacing_ft if z.spacing_ft else base.spacing_ft
-        off = (i % 2) * (z_spacing / 2.0)             # alternate by depth
+        off = (i % 2) * (z_spacing / 2.0) + shift     # alternate by depth (+ slack shift)
         offsets.append(off)
         p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
                     spacing_ft=z_spacing, azimuth_deg=az)
@@ -527,6 +566,8 @@ def generate_wine_rack(
         note=(f"{len(zs)} zones / {total_wells} {well_kind} wells / {total_legs} legs; stagger "
               f"{stagger:.0f} ft; min inter-zone offset "
               f"{('%.0f ft' % min_off) if finite else 'n/a'}"
+              + (f"; pattern slack-shifted {shift:.0f} ft cross-axis (full-length rows)"
+                 if shift else "")
               + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")
               + (f"  [U-turn leg-to-leg < {base.uturn_min_leg_to_leg_ft:.0f} ft floor -> "
                  f"singles: {', '.join(floored_zs)}]" if floored_zs else "")
