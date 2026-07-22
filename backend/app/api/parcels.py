@@ -3,6 +3,9 @@ WGS84 GeoJSON for the map + a label to pick from."""
 
 from __future__ import annotations
 
+import os
+import re
+
 import psycopg
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from shapely.geometry import mapping
@@ -77,8 +80,12 @@ def synthetic(side_ft: float = 5280.0, lon: float = -103.8, lat: float = 31.9) -
 @router.post("/upload", response_model=ParcelsResponse)
 async def upload(file: UploadFile = File(...)) -> ParcelsResponse:
     data = await file.read()
+    # geometry-only ingest: placeholder labels come from the ZIP NAME, never
+    # from shapefile attributes (the user renames deals in the app)
+    stem = os.path.splitext(os.path.basename(file.filename or ""))[0]
+    base = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_") or "parcel"
     try:
-        parcels = load_named_parcels(data)
+        parcels = load_named_parcels(data, base_label=base)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     out = [
@@ -86,6 +93,6 @@ async def upload(file: UploadFile = File(...)) -> ParcelsResponse:
             label=label, area_ac=round(geom.area / _ACRE_M2, 1),
             geojson=mapping(_to_wgs_geom(geom)),
         )
-        for label, geom in sorted(parcels.items())
+        for label, geom in parcels.items()   # file order (labels are numbered)
     ]
     return ParcelsResponse(parcels=out)

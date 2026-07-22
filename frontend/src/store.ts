@@ -271,6 +271,9 @@ interface State {
 
   setParcels: (p: ParcelInfo[]) => void;
   selectParcel: (p: ParcelInfo | null) => void;
+  // rename a deal in place (uploads carry placeholder labels — the shapefile is
+  // geometry-only; the user names deals). Keeps inventory/results: same geometry.
+  renameParcel: (oldLabel: string, newLabel: string) => void;
   loadSynthetic: () => Promise<void>;
   uploadParcels: (file: File) => Promise<void>;
   // seed: false keeps the current bench sources / params instead of reseeding
@@ -347,6 +350,18 @@ export const useStore = create<State>((set, get) => ({
   // inventory fetch for whichever DSU happens to be first. The user starts the
   // fetch explicitly via the "Load inventory" button (fetchInventory).
   selectParcel: (parcel) => set({ parcel, ...PARCEL_RESET }),
+
+  renameParcel: (oldLabel, newLabel) =>
+    set((s) => {
+      const name = newLabel.trim();
+      // empty or colliding with another deal's label -> ignore (labels key the
+      // deal list and dealIdFor; a dup would merge two deals' saves)
+      if (!name || name === oldLabel || s.parcels.some((p) => p.label === name)) return {};
+      return {
+        parcels: s.parcels.map((p) => (p.label === oldLabel ? { ...p, label: name } : p)),
+        parcel: s.parcel?.label === oldLabel ? { ...s.parcel, label: name } : s.parcel,
+      };
+    }),
 
   loadSynthetic: async () => {
     try {

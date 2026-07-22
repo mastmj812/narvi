@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { type Category, type Params } from "../api/client";
 import { colorForBlueox } from "../map/formations";
 import {
@@ -36,11 +36,14 @@ function NumberField<K extends keyof Params>(
 // one map / gun-barrel and saves as one scenario.
 export function PlanPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // inline deal-rename (uploads carry placeholder labels; the user names deals)
+  const [editingLabel, setEditingLabel] = useState<string | null>(null);
+  const [draftLabel, setDraftLabel] = useState("");
   const s = useStore();
   const {
     parcel, parcels, scenarios, inventory, benchSource, cats, culledWells,
     params, sourceAzimuth, benchSpacing, benchTvd, result, loading, error,
-    selectParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
+    selectParcel, renameParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
     toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, generate,
   } = s;
 
@@ -85,7 +88,37 @@ export function PlanPanel() {
                     borderRadius: 5, padding: "2px 4px",
                   }}
                 >
-                  <div style={{ fontWeight: active ? 600 : 400 }}>{p.label}</div>
+                  {editingLabel === p.label ? (
+                    <input
+                      autoFocus
+                      value={draftLabel}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setDraftLabel(e.target.value)}
+                      onBlur={() => { renameParcel(p.label, draftLabel); setEditingLabel(null); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        if (e.key === "Escape") setEditingLabel(null);
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                  ) : (
+                    <div style={{ fontWeight: active ? 600 : 400 }}>
+                      {p.label}
+                      {active && (
+                        <span
+                          title="rename deal"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingLabel(p.label);
+                            setDraftLabel(p.label);
+                          }}
+                          style={{ cursor: "pointer", marginLeft: 6, color: "var(--muted)" }}
+                        >
+                          ✎
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className="meta" style={{ textAlign: "right" }}>
                     {p.area_ac} ac{savedDeals.has(dealIdFor(p.label)) && " · ✓ saved"}
                   </div>

@@ -37,12 +37,6 @@ def _valid_polygonal(g: BaseGeometry) -> Polygon | MultiPolygon:
 
 WORK_EPSG = 32613  # UTM zone 13N, metres
 
-# Attribute fields used to name a parcel in a multi-deal bundle. The label is
-# `<name> <unit>` (e.g. "braveheart WHITE KNIFE"); same-label polygons are unioned.
-_NAME_PREFS = ["dealname", "deal_name", "deal", "name", "prospect", "label", "title"]
-_UNIT_PREFS = ["dsu", "unit", "pad"]
-
-
 def _transformer(src: CRS, dst_epsg: int):
     return Transformer.from_crs(src, CRS.from_epsg(dst_epsg), always_xy=True).transform
 
@@ -92,29 +86,25 @@ def parcel_from_geojson(geom: dict) -> Polygon | MultiPolygon:
     return _valid_polygonal(shp_transform(_transformer(CRS.from_epsg(4326), WORK_EPSG), g))
 
 
-def load_named_parcels(data: bytes) -> dict[str, Polygon | MultiPolygon]:
-    """Multi-deal bundle -> {label: parcel in UTM 13N}. label = `<dealName> <dsu>`;
-    polygons sharing a label are unioned into one parcel."""
-    records, fields, src = _read_shapefile(data)
-    low = {f.lower(): f for f in fields}
-    name_f = next((low[p] for p in _NAME_PREFS if p in low), fields[0] if fields else None)
-    unit_f = next((low[p] for p in _UNIT_PREFS if p in low), None)
+def load_named_parcels(data: bytes, base_label: str = "parcel") -> dict[str, Polygon | MultiPolygon]:
+    """Deal shapefile .zip -> {label: parcel in UTM 13N}, one parcel per polygon
+    record, in file order. The shapefile is consumed for its GEOMETRY ONLY —
+    attributes are never read for naming (land shapefiles carry whatever fields
+    the counterparty's GIS exported; guessing a deal name from them produced
+    labels like "1"/"2" that collided with unrelated saved deals). Labels are
+    `<base_label>_<n>` placeholders (just `<base_label>` for a single-polygon
+    file); the user renames deals in the app."""
+    records, _fields, src = _read_shapefile(data)
     tf = _transformer(src, WORK_EPSG)
-
-    out: dict[str, Polygon | MultiPolygon] = {}
-    for i, sr in enumerate(records):
-        gj = sr.shape.__geo_interface__
-        if gj["type"] not in ("Polygon", "MultiPolygon"):
-            continue
-        rec = sr.record.as_dict()
-        name = str(rec.get(name_f) or "").strip()
-        unit = str(rec.get(unit_f) or "").strip() if unit_f else ""
-        label = (f"{name} {unit}".strip()) or f"deal_{i}"
-        geom = shp_transform(tf, shape(gj))
-        out[label] = unary_union([out[label], geom]) if label in out else geom
-    if not out:
+    geoms = [shp_transform(tf, shape(sr.shape.__geo_interface__)) for sr in records
+             if sr.shape.__geo_interface__["type"] in ("Polygon", "MultiPolygon")]
+    if not geoms:
         raise ValueError("Shapefile contains no polygon geometry.")
-    return {label: _valid_polygonal(g) for label, g in out.items()}
+    width = len(str(len(geoms)))
+    return {
+        (base_label if len(geoms) == 1 else f"{base_label}_{i:0{width}d}"): _valid_polygonal(g)
+        for i, g in enumerate(geoms, start=1)
+    }
 
 
 def synthetic_section(side_ft: float = 5280.0,
