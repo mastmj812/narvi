@@ -3,6 +3,9 @@ WGS84 GeoJSON for the map + a label to pick from."""
 
 from __future__ import annotations
 
+import os
+import re
+
 import psycopg
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from shapely.geometry import mapping
@@ -10,6 +13,7 @@ from shapely.geometry import mapping
 from narvi import (
     gunbarrel_data,
     load_named_parcels,
+    parcel_feasibility,
     parcel_from_geojson,
     scenario_geojson,
     synthetic_section,
@@ -20,11 +24,15 @@ from narvi.warehouse import (
     available_benches,
     bench_summary,
     inventory_from_warehouse,
+    section_azimuth,
 )
 
 from ..deps import get_conn
 from ..models import (
     BenchInfoModel,
+    DirectionFeasibilityModel,
+    FeasibilityRequest,
+    FeasibilityResponse,
     InventoryRequest,
     InventoryResponse,
     ParcelInfo,
@@ -71,6 +79,34 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     )
 
 
+@router.post("/feasibility", response_model=FeasibilityResponse)
+def feasibility(req: FeasibilityRequest) -> FeasibilityResponse:
+    """What each realistic bearing can hold in this parcel — the longest straight
+    row and the cross-axis room, for the offset-grid azimuth (confidence-gated)
+    and the parcel long axis. Drives the feasibility card + the scan's azimuth
+    candidates, so odd tracts (half-sections) stop failing silently. The pool is
+    only touched when the grid azimuth must be sourced (engine.py's lazy pattern),
+    so a stipulated-azimuth call stays DB-free."""
+    parcel = parcel_from_geojson(req.parcel)
+    grid = req.grid_azimuth_deg
+    if grid is None:
+        from .. import db
+
+        pool = db.pool if db.pool is not None else db.open_pool()
+        with pool.connection() as conn:
+            grid = section_azimuth(conn, parcel, req.buffer_ft)   # None if not confident
+    ns = req.setback_ns_ft if req.setback_ns_ft is not None else req.setback_ft
+    ew = req.setback_ew_ft if req.setback_ew_ft is not None else req.setback_ft
+    dirs = parcel_feasibility(parcel, ns, ew, grid_azimuth_deg=grid,
+                              min_lateral_ft=req.min_lateral_ft)
+    return FeasibilityResponse(directions=[
+        DirectionFeasibilityModel(
+            label=d.label, azimuth_deg=d.azimuth_deg, max_lateral_ft=d.max_lateral_ft,
+            cross_extent_ft=d.cross_extent_ft, note=d.note)
+        for d in dirs
+    ])
+
+
 @router.get("/synthetic", response_model=ParcelInfo)
 def synthetic(side_ft: float = 5280.0, lon: float = -103.8, lat: float = 31.9) -> ParcelInfo:
     """A synthetic square section centered in the Loving/Reeves AOI — lets the app
@@ -85,8 +121,12 @@ def synthetic(side_ft: float = 5280.0, lon: float = -103.8, lat: float = 31.9) -
 @router.post("/upload", response_model=ParcelsResponse)
 async def upload(file: UploadFile = File(...)) -> ParcelsResponse:
     data = await file.read()
+    # geometry-only ingest: placeholder labels come from the ZIP NAME, never
+    # from shapefile attributes (the user renames deals in the app)
+    stem = os.path.splitext(os.path.basename(file.filename or ""))[0]
+    base = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_") or "parcel"
     try:
-        parcels = load_named_parcels(data)
+        parcels = load_named_parcels(data, base_label=base)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     out = [
@@ -94,6 +134,6 @@ async def upload(file: UploadFile = File(...)) -> ParcelsResponse:
             label=label, area_ac=round(geom.area / _ACRE_M2, 1),
             geojson=mapping(_to_wgs_geom(geom)),
         )
-        for label, geom in sorted(parcels.items())
+        for label, geom in parcels.items()   # file order (labels are numbered)
     ]
     return ParcelsResponse(parcels=out)

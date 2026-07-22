@@ -9,9 +9,11 @@ import {
   type BenchInfo,
   type GunbarrelData,
   type InventoryResponse,
+  type DirectionFeasibility,
   type OverrideSummary,
   type Params,
   type ParcelInfo,
+  type ScanConfig,
   type ScenarioSummary,
 } from "./api/client";
 
@@ -28,7 +30,7 @@ const DEFAULT_PARAMS: Params = {
   spacing_ft: 880, setback_ft: 330, setback_ns_ft: 330, setback_ew_ft: 330,
   formation: "WCA_1", target_tvd_ft: 11000,
   well_type: "single", objective: "max_lateral", drill_from: "auto", anchor: "auto",
-  azimuth_deg: null, min_lateral_ft: 4000,
+  azimuth_deg: null, min_lateral_ft: 4000, uturn_min_leg_to_leg_ft: 990,
 };
 
 export function dealIdFor(label: string): string {
@@ -41,7 +43,7 @@ export function dealIdFor(label: string): string {
 const SAVED_PARAM_KEYS = [
   "spacing_ft", "setback_ft", "setback_ns_ft", "setback_ew_ft", "formation",
   "target_tvd_ft", "well_type", "objective", "drill_from", "anchor",
-  "azimuth_deg", "min_lateral_ft",
+  "azimuth_deg", "min_lateral_ft", "uturn_min_leg_to_leg_ft",
 ] as const;
 
 function paramsFromScenario(sp: Record<string, unknown> | null | undefined): Partial<Params> {
@@ -238,6 +240,10 @@ interface State {
 
   // inventory (per-deal, fetched explicitly via "Load inventory")
   inventory: InventoryResponse | null;
+  // parcel feasibility card (fetched alongside the inventory) + config scan
+  feasibility: DirectionFeasibility[] | null;
+  scan: ScanConfig[] | null;
+  scanning: boolean;
   benches: BenchInfo[];            // overlap inventory (unit truth: Novi counts)
   devBenches: BenchInfo[];         // area-developable benches (generation control)
   benchSource: Record<string, BenchSource>;
@@ -278,12 +284,18 @@ interface State {
 
   setParcels: (p: ParcelInfo[]) => void;
   selectParcel: (p: ParcelInfo | null) => void;
+  // rename a deal in place (uploads carry placeholder labels — the shapefile is
+  // geometry-only; the user names deals). Keeps inventory/results: same geometry.
+  renameParcel: (oldLabel: string, newLabel: string) => void;
   loadSynthetic: () => Promise<void>;
   uploadParcels: (file: File) => Promise<void>;
   // seed: false keeps the current bench sources / params instead of reseeding
   // them from the discovered benches (used when restoring a saved scenario —
   // the recipe must survive the inventory arriving)
   fetchInventory: (opts?: { seed?: boolean }) => Promise<void>;
+  // config scan (azimuth x type x spacing through the placement engine) + adopt
+  runScan: () => Promise<void>;
+  adoptConfig: (c: ScanConfig) => void;
   setBenchSource: (formation: string, src: BenchSource) => void;
   toggleCat: (c: Category) => void;
   toggleCull: (wellName: string) => void;
@@ -317,6 +329,7 @@ const PARCEL_RESET = {
   result: null, inventory: null, benches: [] as BenchInfo[], devBenches: [] as BenchInfo[],
   benchSource: {} as Record<string, BenchSource>, benchSpacing: {} as Record<string, number>,
   benchTvd: {} as Record<string, number>, culledWells: [] as string[],
+  feasibility: null, scan: null, scanning: false,
   categoryOverrides: {} as Record<string, "PUD" | "UPSIDE">,
   lastGenKey: null, loaded: null, error: null,
 };
@@ -326,6 +339,9 @@ export const useStore = create<State>((set, get) => ({
   parcel: null,
 
   inventory: null,
+  feasibility: null,
+  scan: null,
+  scanning: false,
   benches: [],
   devBenches: [],
   benchSource: {},
@@ -360,6 +376,18 @@ export const useStore = create<State>((set, get) => ({
   // inventory fetch for whichever DSU happens to be first. The user starts the
   // fetch explicitly via the "Load inventory" button (fetchInventory).
   selectParcel: (parcel) => set({ parcel, ...PARCEL_RESET }),
+
+  renameParcel: (oldLabel, newLabel) =>
+    set((s) => {
+      const name = newLabel.trim();
+      // empty or colliding with another deal's label -> ignore (labels key the
+      // deal list and dealIdFor; a dup would merge two deals' saves)
+      if (!name || name === oldLabel || s.parcels.some((p) => p.label === name)) return {};
+      return {
+        parcels: s.parcels.map((p) => (p.label === oldLabel ? { ...p, label: name } : p)),
+        parcel: s.parcel?.label === oldLabel ? { ...s.parcel, label: name } : s.parcel,
+      };
+    }),
 
   loadSynthetic: async () => {
     try {
@@ -399,8 +427,45 @@ export const useStore = create<State>((set, get) => ({
         } : {}),
         loading: false,
       });
+      // feasibility card rides along (best-effort — a failure never blocks the
+      // inventory; the scan re-fetches with current params anyway)
+      try {
+        const f = await api.feasibility(s.parcel.geojson, get().params);
+        set({ feasibility: f.directions });
+      } catch { /* card just doesn't render */ }
     } catch (e) { set({ error: String(e), loading: false }); }
   },
+
+  runScan: async () => {
+    const s = get();
+    if (!s.parcel) return;
+    set({ scanning: true, error: null });
+    try {
+      // fresh feasibility so the scan honors the CURRENT setbacks/min-lateral
+      const f = await api.feasibility(s.parcel.geojson, s.params);
+      const r = await api.scan(s.parcel.geojson, s.params, f.directions);
+      set({ feasibility: f.directions, scan: r.configs, scanning: false });
+    } catch (e) { set({ error: String(e), scanning: false }); }
+  },
+
+  // Adopt a scan row: deal-level azimuth/type/spacing become the generator
+  // params (azimuth as an EXPLICIT override — reproducible, not re-sourced),
+  // and benches already set to generate follow the adopted spacing (per-bench
+  // spacing otherwise overrides the deal default and the adoption would no-op).
+  adoptConfig: (c) =>
+    set((s) => {
+      const benchSpacing = { ...s.benchSpacing };
+      for (const [f, src] of Object.entries(s.benchSource)) {
+        if (src === "generate") benchSpacing[f] = c.spacing_ft;
+      }
+      return {
+        params: {
+          ...s.params, azimuth_deg: c.azimuth_deg, spacing_ft: c.spacing_ft,
+          well_type: c.well_type as Params["well_type"],
+        },
+        benchSpacing,
+      };
+    }),
 
   setBenchSource: (formation, src) =>
     set((s) => ({ benchSource: { ...s.benchSource, [formation]: src } })),

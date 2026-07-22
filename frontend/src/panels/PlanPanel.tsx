@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { type Category, type Params } from "../api/client";
 import { colorForBlueox } from "../map/formations";
 import {
@@ -36,12 +36,16 @@ function NumberField<K extends keyof Params>(
 // one map / gun-barrel and saves as one scenario.
 export function PlanPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
+  // inline deal-rename (uploads carry placeholder labels; the user names deals)
+  const [editingLabel, setEditingLabel] = useState<string | null>(null);
+  const [draftLabel, setDraftLabel] = useState("");
   const s = useStore();
   const {
     parcel, parcels, scenarios, inventory, benchSource, cats, culledWells,
     params, sourceAzimuth, benchSpacing, benchTvd, result, loading, error,
+    feasibility, scan, scanning, runScan, adoptConfig,
     categoryOverrides, toggleCategoryOverride,
-    selectParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
+    selectParcel, renameParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
     toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, generate,
   } = s;
 
@@ -86,7 +90,37 @@ export function PlanPanel() {
                     borderRadius: 5, padding: "2px 4px",
                   }}
                 >
-                  <div style={{ fontWeight: active ? 600 : 400 }}>{p.label}</div>
+                  {editingLabel === p.label ? (
+                    <input
+                      autoFocus
+                      value={draftLabel}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setDraftLabel(e.target.value)}
+                      onBlur={() => { renameParcel(p.label, draftLabel); setEditingLabel(null); }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                        if (e.key === "Escape") setEditingLabel(null);
+                      }}
+                      style={{ width: "100%" }}
+                    />
+                  ) : (
+                    <div style={{ fontWeight: active ? 600 : 400 }}>
+                      {p.label}
+                      {active && (
+                        <span
+                          title="rename deal"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingLabel(p.label);
+                            setDraftLabel(p.label);
+                          }}
+                          style={{ cursor: "pointer", marginLeft: 6, color: "var(--muted)" }}
+                        >
+                          ✎
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <div className="meta" style={{ textAlign: "right" }}>
                     {p.area_ac} ac{savedDeals.has(dealIdFor(p.label)) && " · ✓ saved"}
                   </div>
@@ -295,6 +329,47 @@ export function PlanPanel() {
       {inventory && (
         <div className="section">
           <h2>Generator</h2>
+          {feasibility && feasibility.length > 0 && (
+            <div style={{ marginBottom: 6 }}>
+              {feasibility.map((d) => {
+                const tight = d.note.includes("min lateral");
+                return (
+                  <div key={d.label} className="note"
+                    style={{ marginTop: 0, color: tight ? "#b45309" : undefined }}
+                    title={d.note}>
+                    {d.label} {d.azimuth_deg.toFixed(1)}° — rows ≤ {Math.round(d.max_lateral_ft).toLocaleString()}′,
+                    {" "}{Math.round(d.cross_extent_ft).toLocaleString()}′ across{tight ? " · under min lateral" : ""}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <button className="ghost" disabled={scanning} onClick={() => runScan()}
+            title="sweep azimuth x well type x spacing through the placement engine and rank by completed footage">
+            {scanning ? "scanning…" : "Scan configurations"}
+          </button>
+          {scan && (
+            <div style={{ margin: "6px 0" }}>
+              {scan.length === 0 && (
+                <div className="note">no configuration places a well — relax min lateral or setbacks</div>
+              )}
+              {scan.slice(0, 6).map((c, i) => (
+                <div key={i} className="field" title={c.note} style={{ fontSize: 11 }}>
+                  <label style={{ fontSize: 11 }}>
+                    {c.azimuth_label} {c.azimuth_deg.toFixed(0)}° · {c.well_type === "uturn" ? "U-turn" : "single"} @ {c.spacing_ft.toFixed(0)}′
+                    <span style={{ color: "var(--muted)" }}>
+                      {" "}· {c.wells}w · {Math.round(c.completed_ft / 1000)}k′ ({Math.round(c.ft_per_well).toLocaleString()}′/w)
+                    </span>
+                  </label>
+                  <button className="ghost" style={{ padding: "0 8px" }}
+                    onClick={() => adoptConfig(c)}
+                    title="adopt: sets azimuth override, well type, and spacing (incl. generate benches)">
+                    use
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {zones.length === 0 && (
             <div className="note">set a bench to “generate” to design wells</div>
           )}
@@ -328,23 +403,32 @@ export function PlanPanel() {
             </select>
           </div>
           <div className="field">
-            <label title="where the row pattern hangs across the unit">anchor</label>
+            <label title={"where the row pattern hangs across the unit. West/east LINE anchors derive "
+              + "the azimuth from that lease line, so they're disabled while an azimuth override is set "
+              + "(auto still tries edge-hung patterns at the overridden bearing)."}>anchor</label>
             <select value={params.anchor} onChange={(e) => setParam("anchor", e.target.value as Params["anchor"])}>
               <option value="auto">auto (max footage)</option>
-              <option value="west">west line</option>
-              <option value="east">east line</option>
+              <option value="west" disabled={params.azimuth_deg != null}>west line</option>
+              <option value="east" disabled={params.azimuth_deg != null}>east line</option>
               <option value="center">center</option>
             </select>
           </div>
           {params.well_type === "uturn" && (
-            <div className="field">
-              <label title="which side the pads/heels go; the U-turn sits at the opposite end">drill from</label>
-              <select value={params.drill_from} onChange={(e) => setParam("drill_from", e.target.value as Params["drill_from"])}>
-                <option value="auto">auto (max footage)</option>
-                <option value="north">north</option>
-                <option value="south">south</option>
-              </select>
-            </div>
+            <>
+              <div className="field">
+                <label title="which side the pads/heels go; the U-turn sits at the opposite end">drill from</label>
+                <select value={params.drill_from} onChange={(e) => setParam("drill_from", e.target.value as Params["drill_from"])}>
+                  <option value="auto">auto (max footage)</option>
+                  <option value="north">north</option>
+                  <option value="south">south</option>
+                </select>
+              </div>
+              <NumberField
+                label="U-turn floor (ft)" k="uturn_min_leg_to_leg_ft" step={10}
+                title={"tightest drillable turn: leg-to-leg spacing = turn diameter (radius = half). "
+                  + "Pairs spaced under this fall back to singles — lower it to U-turn tighter rows."}
+              />
+            </>
           )}
           {(params.anchor === "west" || params.anchor === "east") ? (
             <div className="field">
@@ -355,10 +439,41 @@ export function PlanPanel() {
               <input type="checkbox" checked disabled />
             </div>
           ) : (
-            <div className="field">
-              <label title="adopt the offset-well grid azimuth sourced from the warehouse">grid azimuth (auto)</label>
-              <input type="checkbox" checked={sourceAzimuth} onChange={(e) => setSourceAzimuth(e.target.checked)} />
-            </div>
+            <>
+              <div className="field">
+                <label title="adopt the offset-well grid azimuth sourced from the warehouse (ignored while an override is set below)"
+                  style={params.azimuth_deg != null ? { color: "var(--muted)" } : undefined}>
+                  grid azimuth (auto)
+                </label>
+                <input type="checkbox" checked={sourceAzimuth} disabled={params.azimuth_deg != null}
+                  onChange={(e) => setSourceAzimuth(e.target.checked)} />
+              </div>
+              <div className="field">
+                <label
+                  title="hard bearing for the laterals, 0-180 deg (0 = N-S, 90 = E-W) — e.g. run down the long axis of a half-section instead of the offset grid; empty = auto"
+                  style={{ color: params.azimuth_deg != null ? "var(--accent)" : undefined }}
+                >
+                  azimuth (deg){params.azimuth_deg != null ? " · override" : " · auto"}
+                  {params.azimuth_deg != null && (
+                    <>
+                      {" "}
+                      <span
+                        onClick={() => setParam("azimuth_deg", null)}
+                        style={{ cursor: "pointer", textDecoration: "underline" }}
+                        title="clear the override (back to the sourced grid azimuth / long axis)"
+                      >
+                        reset
+                      </span>
+                    </>
+                  )}
+                </label>
+                <input type="number" step={0.1} min={0} max={180} style={{ width: 80 }}
+                  value={params.azimuth_deg ?? ""}
+                  placeholder="auto"
+                  onChange={(e) => setParam("azimuth_deg",
+                    e.target.value === "" ? null : Number(e.target.value))} />
+              </div>
+            </>
           )}
           <button className="primary" disabled={loading || zones.length === 0} onClick={() => generate()}>
             {loading ? "working…" : stale && result ? "Re-generate" : "Generate"}

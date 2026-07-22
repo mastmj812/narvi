@@ -274,6 +274,30 @@ def _deal_anchor(window, az, p, uturn, spacing_m, gb) -> str:
     return best_a
 
 
+def _deal_anchor_zones(window, az, base, zs, z_spacings, gb) -> str:
+    """Wine-rack deal anchor: evaluate each anchor on the ZONES AS THEY WILL PLACE
+    — each zone's own spacing, U-turn eligibility, and stagger phase — and keep the
+    anchor drilling the most total footage (center on a tie). Evaluating only the
+    lead spacing at phase 0 (what `_deal_anchor` does) misses that a staggered
+    phase can need the slack an edge anchor provides: on a tight cross-window the
+    centered phase-0 row plateaus at one leg while a lease-line anchor fits a full
+    staggered U-turn in EVERY zone (Castaway half-sections, 1,200 ft leg-to-leg in
+    a 1,980 ft window)."""
+    best_a, best_ft = "center", -1.0
+    for a in ("center", "west", "east"):
+        ft = 0.0
+        for i, (z, sp) in enumerate(zip(zs, z_spacings)):
+            off = (i % 2) * (sp / 2.0)                  # the placement loop's stagger
+            u = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+            p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
+                          spacing_ft=sp)
+            ws, _ = _place_for_anchor(window, az, p_i, off, a, u, sp / FT_PER_M, gb)
+            ft += sum(w.completed_lateral_ft for w in ws)
+        if ft > best_ft + 1.0:                          # center first -> wins ties
+            best_a, best_ft = a, ft
+    return best_a
+
+
 def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float,
                 anchor: str = "center") -> int:
     return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset, anchor)[0])
@@ -310,7 +334,9 @@ def _best_azimuth(window: BaseGeometry, p: ScenarioParams) -> float:
 def _resolve_azimuth(parcel: BaseGeometry, window: BaseGeometry, p: ScenarioParams) -> float:
     # A stipulated W/E anchor line DEFINES the azimuth: laterals run parallel to that
     # lease line. This overrides any sourced/long-axis azimuth so the development
-    # stays exactly parallel to the setback (no fractional-degree drift).
+    # stays exactly parallel to the setback (no fractional-degree drift). The UI
+    # hides the azimuth override while a line anchor is chosen, so the two
+    # stipulations never fight on screen.
     if p.anchor in ("west", "east"):
         edge_az = anchor_edge_azimuth(parcel, p.anchor)
         if edge_az is not None:
@@ -363,7 +389,11 @@ def generate_scenario(
         # 'center' tries both row phases (a row on the midline vs straddling it) and
         # keeps the one that packs more — anchoring a row exactly on the midline can
         # fit one fewer than the equally-centered half-shift (3 vs 4 at 1,200 ft).
-        offs = (row_offset_ft, row_offset_ft + half) if a == "center" else (row_offset_ft,)
+        # ONLY when this call owns the phase (optimize_phase): under a wine-rack the
+        # phase IS the stagger — re-choosing it per zone let every zone converge to
+        # the same max-footage phase and stack benches on one cross-section.
+        offs = ((row_offset_ft, row_offset_ft + half)
+                if a == "center" and optimize_phase else (row_offset_ft,))
         cand, cand_dropped = max(
             (_place_for_anchor(window, az, p, o, a, uturn, spacing_m, gb) for o in offs),
             key=lambda r: round(sum(w.completed_lateral_ft for w in r[0]), 1))
@@ -376,17 +406,23 @@ def generate_scenario(
     for w in wells:
         w.lateral_azimuth_deg = round(az, 1)
     n_legs = sum(len(w.legs) for w in wells)
+    note = (f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
+            f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
+            f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
+            + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
+               f"floor -> singles]" if floored else "")
+            + (f"  [{dropped} short {'well' if uturn else 'lateral'}{'s' if dropped != 1 else ''} "
+               f"< {p.min_lateral_ft:.0f} ft dropped]" if dropped else ""))
+    if not wells:
+        # a bare zero reads as a generator failure — say what the geometry holds
+        # and which bearing would work (lazy import: feasibility uses this module)
+        from .feasibility import zero_well_hint
+        note += zero_well_hint(parcel, p, az)
     feas = Feasibility(
         requested=None, placed=len(wells), legs=n_legs, dropped=dropped,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
         total_drilled_ft=round(sum(w.drilled_lateral_ft for w in wells), 1),
-        note=(f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
-              f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
-              f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
-              + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
-                 f"floor -> singles]" if floored else "")
-              + (f"  [{dropped} short {'well' if uturn else 'lateral'}{'s' if dropped != 1 else ''} "
-                 f"< {p.min_lateral_ft:.0f} ft dropped]" if dropped else "")),
+        note=note,
     )
     return wells, window, feas
 
@@ -422,15 +458,55 @@ def generate_wine_rack(
     base_eval = replace(base, spacing_ft=lead_spacing)
     u = base.well_type == "uturn" and lead_spacing >= base.uturn_min_leg_to_leg_ft
     spacing_m = lead_spacing / FT_PER_M
-    # Fix the row anchor ONCE for the deal (zones share where development hangs).
+    # Fix the row anchor ONCE for the deal (zones share where development hangs),
+    # judged on the zones as they will actually place (spacing + stagger phase).
+    anchor_stipulated = base.anchor != "auto"
     if base.anchor == "auto":
-        base = replace(base, anchor=_deal_anchor(window0, az, base_eval, u, spacing_m, gb))
+        base = replace(base, anchor=_deal_anchor_zones(window0, az, base, zs, z_spacings, gb))
     # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
     # side); auto-pick the higher-footage side, evaluated at the chosen anchor.
     # 'north'/'south' -> each zone resolves the same end from drill_from + the az.
     if u and base.drill_from == "auto" and base.turn_at_high is None:
         base = replace(base, turn_at_high=_deal_uturn_orientation(
             window0, az, replace(base_eval, anchor=base.anchor), gb, base.anchor))
+
+    # Cross-axis SLACK SHIFT (auto anchor only): the discrete hangs (flush edge /
+    # center / stagger phase) can park a boundary row on a clipped chord — a short
+    # stick against a non-parallel lease line — while the whole pattern has room to
+    # slide across the unit (Castaway S2: the southern U-turn leg hit the boundary
+    # with ~180 ft of slack to the north). Scan ONE shared delta for the deal (the
+    # relative stagger is preserved) and keep the shift that drills the most total
+    # footage; ties go to no-shift so clean rectangular layouts stay put. A
+    # stipulated W/E/center anchor is a design intent — never shifted.
+    def _zone_wells(i: int, z, sp: float, delta: float):
+        off = (i % 2) * (sp / 2.0) + delta
+        u_i = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+        p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
+                      spacing_ft=sp)
+        return _place_for_anchor(window0, az, p_i, off, base.anchor, u_i,
+                                 sp / FT_PER_M, gb)[0]
+
+    shift = 0.0
+    if not anchor_stipulated and zs:
+        def _total(delta: float) -> float:
+            return sum(w.completed_lateral_ft
+                       for i, (z, sp) in enumerate(zip(zs, z_spacings))
+                       for w in _zone_wells(i, z, sp, delta))
+        period = max(z_spacings)
+        best_ft = _total(0.0)
+        coarse = 25.0
+        d = coarse
+        while d < period:
+            ft = _total(d)
+            if ft > best_ft + 1.0:
+                best_ft, shift = ft, d
+            d += coarse
+        if shift:                                  # refine to ~5 ft around the best
+            lo = max(5.0, shift - coarse)
+            for dd in range(int(lo), int(min(period, shift + coarse)) + 1, 5):
+                ft = _total(float(dd))
+                if ft > best_ft + 0.5:
+                    best_ft, shift = ft, float(dd)
 
     all_wells: list[InventoryWell] = []
     zresults: list[ZoneResult] = []
@@ -441,7 +517,7 @@ def generate_wine_rack(
         # per-bench spacing (Novi develops Bone Spring wider than Wolfcamp); the
         # stagger and offset follow that bench's spacing, falling back to the base.
         z_spacing = z.spacing_ft if z.spacing_ft else base.spacing_ft
-        off = (i % 2) * (z_spacing / 2.0)             # alternate by depth
+        off = (i % 2) * (z_spacing / 2.0) + shift     # alternate by depth (+ slack shift)
         offsets.append(off)
         p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
                     spacing_ft=z_spacing, azimuth_deg=az)
@@ -473,6 +549,10 @@ def generate_wine_rack(
 
     total_wells = sum(z.wells for z in zresults)
     total_legs = sum(z.legs for z in zresults)
+    zero_hint = ""
+    if total_wells == 0:
+        from .feasibility import zero_well_hint
+        zero_hint = zero_well_hint(parcel, replace(base, spacing_ft=lead_spacing), az)
     well_kind = "uturn" if any(w.turn for w in all_wells) else "single"
     # flag the floor per ZONE, at the spacing that placed that zone's wells
     floored_zs = [f"{z.formation} {sp:.0f}" for z, sp in zip(zs, z_spacings)
@@ -486,10 +566,13 @@ def generate_wine_rack(
         note=(f"{len(zs)} zones / {total_wells} {well_kind} wells / {total_legs} legs; stagger "
               f"{stagger:.0f} ft; min inter-zone offset "
               f"{('%.0f ft' % min_off) if finite else 'n/a'}"
+              + (f"; pattern slack-shifted {shift:.0f} ft cross-axis (full-length rows)"
+                 if shift else "")
               + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")
               + (f"  [U-turn leg-to-leg < {base.uturn_min_leg_to_leg_ft:.0f} ft floor -> "
                  f"singles: {', '.join(floored_zs)}]" if floored_zs else "")
               + (f"  [{dropped_total} short well{'s' if dropped_total != 1 else ''} "
-                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped]" if dropped_total else "")),
+                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped]" if dropped_total else "")
+              + zero_hint),
     )
     return all_wells, window, report

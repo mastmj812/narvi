@@ -341,3 +341,71 @@ def test_objective_max_count_vs_max_lateral():
     avg_lat = sum(w.legs[0].length_ft for w in lat_w) / len(lat_w)
     avg_cnt = sum(w.legs[0].length_ft for w in cnt_w) / len(cnt_w)
     assert avg_lat > avg_cnt
+
+
+def test_wine_rack_uturn_zones_stagger_not_stack():
+    # Regression (Castaway half-sections): with an auto anchor resolving to center,
+    # each zone's dual-phase center try re-chose the max-footage phase PER ZONE, so
+    # every 1,200 ft U-turn zone converged to the same cross-section — stacked
+    # benches, zero horizontal offset, separated only by dTVD. Zones must place at
+    # their stagger phase; the deal anchor must be judged on the staggered zones.
+    parcel = _rect_parcel(5280, 2640)              # E-W half-section (N2/S2 shape)
+    base = _params(well_type="uturn", spacing_ft=1200, setback_ft=330,
+                   azimuth_deg=90.0, anchor="auto", min_lateral_ft=4000)
+    zones = [Zone("BS3_S", 11364, spacing_ft=1200.0),
+             Zone("WCA_2", 11663, spacing_ft=1200.0),
+             Zone("WCB_1", 12024, spacing_ft=1200.0)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+
+    # every zone fits one full U-turn in the 1,980 ft cross-window
+    by_zone = {}
+    for w in wells:
+        by_zone.setdefault(w.target_tvd_ft, []).append(w)
+    assert set(by_zone) == {11364.0, 11663.0, 12024.0}
+    assert all(len(ws) == 1 and ws[0].well_type == "uturn" for ws in by_zone.values())
+
+    # adjacent zones must NOT share a cross-section: offset by the 600 ft stagger
+    xs = {tvd: sorted(round(leg.gunbarrel_x_ft) for leg in ws[0].legs)
+          for tvd, ws in by_zone.items()}
+    assert xs[11364.0] != xs[11663.0]
+    d = abs(xs[11663.0][0] - xs[11364.0][0])
+    assert abs(d - 600) < 1
+    # true 3-D nearest-leg gap reported (not zero-horizontal stacking)
+    assert rep.min_interzone_offset_ft is not None and rep.min_interzone_offset_ft > 600
+
+
+def test_wine_rack_slack_shift_avoids_boundary_clipped_stick():
+    # Regression (Castaway S2 sec 35, the real tract): a survey tract a few
+    # degrees off the lateral bearing clips the far boundary row short — the
+    # flush anchor only guarantees the ANCHORED row is full; the pattern's far
+    # end landed in the opposite edge's clipped band (two U-turn legs at 3,888 ft
+    # vs 4,388 ft full) while cross-axis slack sat unused. Auto anchor must
+    # slide the whole deal (ONE shared delta — stagger preserved) to full-length
+    # rows; a stipulated anchor stays put.
+    from dataclasses import replace
+
+    from shapely.geometry import Polygon
+
+    parcel = Polygon([  # castaway_2 in the work CRS (UTM 13N, m)
+        (671220.2, 3509056.2), (672717.3, 3509561.9), (672975.5, 3508798.9),
+        (671475.5, 3508296.9), (671220.2, 3509056.2)])
+    base = _params(formation="X", well_type="uturn", spacing_ft=1200,
+                   setback_ft=330, setback_ns_ft=330.0, setback_ew_ft=100.0,
+                   azimuth_deg=71.3, anchor="auto", min_lateral_ft=4000)
+    zones = [Zone("BS3_S", 11364, spacing_ft=1200.0),
+             Zone("WCA_2", 11663, spacing_ft=1200.0),
+             Zone("WCB_1", 12024, spacing_ft=1200.0)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+
+    assert len(wells) == 3 and all(w.well_type == "uturn" for w in wells)
+    # every leg full length (~4,385-4,389 ft); the clipped pair read 3,888 ft
+    min_leg = min(leg.length_ft for w in wells for leg in w.legs)
+    assert min_leg > 4300, f"boundary-clipped leg survived: {min_leg:.0f} ft"
+    assert "slack-shifted" in rep.note
+    # zones still wine-racked (stagger preserved through the shared shift)
+    xs = {w.formation: sorted(round(leg.gunbarrel_x_ft) for leg in w.legs) for w in wells}
+    assert xs["BS3_S"] != xs["WCA_2"]
+
+    # stipulated center anchor: no shift (design intent respected)
+    _, _, rep_c = generate_wine_rack(parcel, replace(base, anchor="center"), zones)
+    assert "slack-shifted" not in rep_c.note
