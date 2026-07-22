@@ -155,6 +155,15 @@ class SaveCurateRequest(BaseModel):
                                                # same membership, same saved set
 
 
+class ShapefileExportRequest(BaseModel):
+    """The browser's current (post-cull, post-filter) FC -> zipped shapefile of
+    the inventory legs only (PDP/context filtered server-side). layer_name
+    becomes the .shp/.dbf/... basename inside the zip."""
+
+    geojson: dict[str, Any]                    # scenario/bundle FeatureCollection, WGS84
+    layer_name: str = "narvi_inventory"
+
+
 class ScenarioSummary(BaseModel):
     deal_id: str
     scenario_id: str

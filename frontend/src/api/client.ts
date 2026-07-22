@@ -224,6 +224,18 @@ export const api = {
     }>(
       `/api/scenarios/${encodeURIComponent(deal_id)}/${encodeURIComponent(scenario_id)}`),
 
+  // zipped shapefile of the FC's inventory legs (pud/res/generated — PDP is
+  // filtered server-side). layer_name names the .shp/.dbf files inside the zip.
+  exportShapefile: async (geojson: GeoJSON.FeatureCollection, layer_name: string): Promise<Blob> => {
+    const r = await fetch("/api/export/shapefile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ geojson, layer_name }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `shapefile export -> ${r.status}`);
+    return r.blob();
+  },
+
   deleteScenario: async (deal_id: string, scenario_id: string) => {
     const r = await fetch(`/api/scenarios/${encodeURIComponent(deal_id)}/${encodeURIComponent(scenario_id)}`,
       { method: "DELETE" });

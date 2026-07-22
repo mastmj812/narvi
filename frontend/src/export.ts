@@ -1,11 +1,19 @@
 // Client-side export of the current deal inventory (post-cull, post-filter). The
 // scenario FeatureCollection already lives in the browser (curate inventory or an
-// override/loaded result), so no backend round-trip is needed. Two formats:
-//   * GeoJSON — the FC verbatim (leg LineStrings + parcel/window/turn features)
-//   * CSV     — one row per producing leg, geometry flattened to heel/toe lon-lat
+// override/loaded result), so no backend round-trip is needed. Three formats:
+//   * GeoJSON   — the FC verbatim (leg LineStrings + parcel/window/turn features)
+//   * CSV       — one row per producing leg, geometry flattened to heel/toe lon-lat
+//   * Shapefile — the one backend round-trip (zipped multi-file binary): the FC
+//                 posts to /api/export/shapefile, which keeps ONLY inventory legs
+//                 (pud/res/generated, never PDP) — the GGX geologist handoff
+
+import { api } from "./api/client";
 
 function download(filename: string, mime: string, text: string): void {
-  const blob = new Blob([text], { type: mime });
+  downloadBlob(filename, new Blob([text], { type: mime }));
+}
+
+function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -18,6 +26,12 @@ function download(filename: string, mime: string, text: string): void {
 
 export function exportGeoJSON(fc: GeoJSON.FeatureCollection, filename: string): void {
   download(filename, "application/geo+json", JSON.stringify(fc));
+}
+
+// inventory sticks only (backend drops pdp/context legs); `base` names both the
+// downloaded zip and the .shp/.dbf files inside it. Throws on a PDP-only FC.
+export async function exportShapefile(fc: GeoJSON.FeatureCollection, base: string): Promise<void> {
+  downloadBlob(`${base}.zip`, await api.exportShapefile(fc, base));
 }
 
 // leg property -> CSV column, in order. heel/toe lon-lat come from the geometry.
@@ -108,4 +122,10 @@ export function exportBundleCSV(items: BundleItem[], filename: string): void {
 
 export function exportBundleGeoJSON(items: BundleItem[], filename: string): void {
   download(filename, "application/geo+json", JSON.stringify(bundleToGeoJSON(items)));
+}
+
+// bundle shapefile: the dsu-stamped combined FC -> one zip; the backend adds a
+// leading DSU column when it sees the property (mirrors the bundle CSV).
+export async function exportBundleShapefile(items: BundleItem[], base: string): Promise<void> {
+  await exportShapefile(bundleToGeoJSON(items), base);
 }

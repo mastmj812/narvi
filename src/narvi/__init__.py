@@ -21,6 +21,7 @@ from .records import (
     Zone,
     ZoneResult,
 )
+from .shp_export import inventory_shapefile_zip
 from .viz import gunbarrel_data, scenario_geojson
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "ZoneResult",
     "scenario_geojson",
     "gunbarrel_data",
+    "inventory_shapefile_zip",
 ]

@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from narvi import persist
 
 from app import __version__, db
-from app.api import basemap, generate, health, parcels, scenarios, tiles, warehouse
+from app.api import basemap, export, generate, health, parcels, scenarios, tiles, warehouse
 
 logger = logging.getLogger("narvi")
 
@@ -61,3 +61,4 @@ app.include_router(generate.router, prefix="/api")
 app.include_router(warehouse.router, prefix="/api")
 app.include_router(scenarios.router, prefix="/api")
 app.include_router(tiles.router, prefix="/api")
+app.include_router(export.router, prefix="/api")
