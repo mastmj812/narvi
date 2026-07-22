@@ -56,6 +56,10 @@ class GenerateRequest(BaseModel):
     source_tvd: bool = False                   # wine-rack: source zone TVDs from warehouse
     source_azimuth: bool = False               # adopt the offset-well grid azimuth
     buffer_ft: float = 5280.0
+    # score generated sticks against the sql/30 qualifying-PDP gate (3 mi) and
+    # attach the handoff category (PDP/PUD/UPSIDE) for display. Opt-in: it's a
+    # warehouse round-trip, and a pure-geometry generate stays DB-free.
+    score_support: bool = False
 
 
 class GenerateResponse(BaseModel):
@@ -119,6 +123,10 @@ class SaveScenarioRequest(BaseModel):
     culled_wells: list[str] = []               # per-well culls (well_name) baked out of
                                                # the persisted plan — the forecaster
                                                # hand-off must not carry culled wells
+    # per-well handoff-category overrides (well_name -> PUD | UPSIDE), applied
+    # after the auto scoring. PDP is never an override target — existing
+    # producers classify PDP automatically and can't be reclassified.
+    category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
 
 
 class SaveComposedRequest(BaseModel):
@@ -138,6 +146,7 @@ class SaveComposedRequest(BaseModel):
     zones: list[ZoneModel] = []                # per-bench TVD/spacing (generate benches)
     source_azimuth: bool = True
     buffer_ft: float = 5280.0
+    category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
 
 
 class SaveCurateRequest(BaseModel):
@@ -151,6 +160,7 @@ class SaveCurateRequest(BaseModel):
     kept_benches: list[str]                    # formation_blueox codes kept
     categories: list[str] = ["pdp", "pud", "res"]   # active categories
     culled_wells: list[str] = []               # per-well culls (well_name) to drop
+    category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
     buffer_ft: float = 5280.0                  # match /parcels/inventory: same fetch,
                                                # same membership, same saved set
 

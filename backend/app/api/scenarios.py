@@ -11,8 +11,8 @@ import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 
 from narvi import gunbarrel_data, parcel_from_geojson, persist, scenario_geojson
-from narvi.records import ScenarioParams
-from narvi.warehouse import inventory_from_warehouse
+from narvi.records import InventoryWell, ScenarioParams
+from narvi.warehouse import apply_handoff_support, inventory_from_warehouse
 
 from ..deps import get_conn
 from ..engine import run_generate
@@ -24,6 +24,30 @@ from ..models import (
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
 
 _ACRE_M2 = 4046.8564224
+
+
+def _classify_for_handoff(
+    conn: psycopg.Connection,
+    wells: list[InventoryWell],
+    overrides: dict[str, str],
+) -> None:
+    """Score + auto-classify the plan (PDP/PUD/UPSIDE), then apply the user's
+    per-well overrides. Overrides target planned wells only — an existing
+    producer is PDP by definition — and an override naming an unknown or PDP
+    well is a 400, never silently dropped."""
+    apply_handoff_support(conn, wells)
+    by_name = {w.well_name: w for w in wells}
+    problems = []
+    for name, cat in overrides.items():
+        w = by_name.get(name)
+        if w is None:
+            problems.append(f"override for unknown well {name!r}")
+        elif w.category == "pdp":
+            problems.append(f"override on existing producer {name!r} (PDP is fixed)")
+        else:
+            w.handoff_category = cat
+    if problems:
+        raise HTTPException(status_code=400, detail="; ".join(problems))
 
 
 @router.get("", response_model=list[ScenarioSummary])
@@ -54,12 +78,14 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     culled = set(req.culled_wells)
     if culled:
         wells = [w for w in wells if w.well_name not in culled]
+    _classify_for_handoff(conn, wells, req.category_overrides)
     n = persist.save_scenario(
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
         # `generate` = the exact request recipe (minus the parcel, which reloads
         # from the stored AOI) so the client can restore an EDITABLE override
         # state on load — params, mode, and per-bench zones included.
         summary={"note": summary, "warehouse_notes": notes,
+                 "category_overrides": req.category_overrides,
                  "generate": req.generate.model_dump(mode="json", exclude={"parcel"})},
         name=req.name)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
@@ -80,6 +106,7 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
         raise HTTPException(status_code=400, detail="no inventory wells in the kept selection")
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
+    _classify_for_handoff(conn, wells, req.category_overrides)
     # synthetic header params: a curate baseline is pass-through singles, not a run
     p = ScenarioParams(
         scenario_id=req.scenario_id, deal_id=req.deal_id, formation="", target_tvd_ft=0.0,
@@ -88,7 +115,8 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
     n = persist.save_scenario(
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
         summary={"mode": "curate", "kept_benches": req.kept_benches,
-                 "categories": list(cats), "culled_wells": req.culled_wells}, name=req.name)
+                 "categories": list(cats), "culled_wells": req.culled_wells,
+                 "category_overrides": req.category_overrides}, name=req.name)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 
@@ -132,6 +160,7 @@ def save_composed(
         raise HTTPException(status_code=400, detail="composed plan has no wells")
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
+    _classify_for_handoff(conn, wells, req.category_overrides)
     if p is None:  # pure-baseline compose: synthetic pass-through header (like curate)
         p = ScenarioParams(
             scenario_id=req.scenario_id, deal_id=req.deal_id, formation="",
@@ -144,6 +173,7 @@ def save_composed(
         summary={
             "mode": "composed", "bench_sources": req.bench_sources,
             "categories": list(req.categories), "culled_wells": req.culled_wells,
+            "category_overrides": req.category_overrides,
             "generate": {
                 "params": req.params.model_dump(mode="json"),
                 "zones": [z.model_dump(mode="json") for z in gen_zones],

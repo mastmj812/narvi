@@ -111,6 +111,7 @@ def scenario_geojson(
                     "category": w.category, "novi_wellname": w.novi_wellname,
                     "recon_status": w.recon_status, "context": w.context,
                     "pdp_count_3mi": w.pdp_count_3mi, "inflation_ratio": w.inflation_ratio,
+                    "handoff_category": w.handoff_category,
                     "formation": w.formation, "formation_color": colors.get(w.formation, _LEG_COLOR),
                     "target_tvd_ft": w.target_tvd_ft, "leg_index": i,
                     "length_ft": leg.length_ft, "gunbarrel_x_ft": leg.gunbarrel_x_ft,
@@ -150,6 +151,7 @@ def gunbarrel_data(wells: list[InventoryWell]) -> dict:
                 "category": w.category, "novi_wellname": w.novi_wellname,
                 "recon_status": w.recon_status, "context": w.context,
                 "pdp_count_3mi": w.pdp_count_3mi, "inflation_ratio": w.inflation_ratio,
+                "handoff_category": w.handoff_category,
                 "offset_ft": leg.gunbarrel_x_ft, "tvd_ft": w.target_tvd_ft,
             })
         if w.turn is not None and len(w.legs) == 2:

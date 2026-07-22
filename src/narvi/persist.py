@@ -220,6 +220,12 @@ def _well_from_detail(detail: dict) -> InventoryWell:
         edited=detail.get("edited", False),
         recon_status=detail.get("recon_status"),
         context=detail.get("context", False),
+        # handoff classification state: the count is the provenance of the auto
+        # category, the category itself may carry a user override — both must
+        # survive a reload (the Blue Ox exporter reads them from `detail`).
+        pdp_count_3mi=detail.get("pdp_count_3mi"),
+        inflation_ratio=detail.get("inflation_ratio"),
+        handoff_category=detail.get("handoff_category"),
     )
 
 
