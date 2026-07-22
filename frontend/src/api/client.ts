@@ -30,15 +30,23 @@ export interface GenerateRequest {
   source_tvd?: boolean;
   source_azimuth?: boolean;
   buffer_ft?: number;
+  // score generated sticks vs the sql/30 qualifying-PDP gate and attach the
+  // handoff category (PDP/PUD/UPSIDE) for display
+  score_support?: boolean;
 }
+
+// workbook-handoff classification (auto: pdp_count_3mi >= 3 -> PUD; override
+// toggles PUD/UPSIDE; existing producers are PDP, fixed)
+export type HandoffCategory = "PDP" | "PUD" | "UPSIDE";
 
 export interface GunbarrelData {
   formations: { formation: string; color: string }[];
   points: {
     well_name: string; formation: string; color: string; well_type: string;
     category: string; novi_wellname: string | null; recon_status: string | null;
-    pdp_count_3mi: number | null;    // offset-PDP support (sql/30); null for pdp/generated
+    pdp_count_3mi: number | null;    // offset-PDP support (sql/30); null = unscored
     inflation_ratio: number | null;
+    handoff_category?: HandoffCategory | null;  // auto classification (server-side)
     context?: boolean;               // near-parcel PDP background (not unit inventory)
     offset_ft: number; tvd_ft: number;
   }[];
@@ -113,6 +121,7 @@ export interface ComposedSummary {
   bench_sources: Record<string, string>;
   categories: Category[];
   culled_wells: string[];
+  category_overrides?: Record<string, "PUD" | "UPSIDE">;
   generate?: {
     params?: Record<string, unknown>;
     zones?: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
@@ -131,6 +140,7 @@ export interface SaveComposedBody {
   bench_sources: Record<string, string>;
   categories: Category[];
   culled_wells: string[];
+  category_overrides: Record<string, "PUD" | "UPSIDE">;
   params: Params;
   zones: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
   source_azimuth: boolean;
