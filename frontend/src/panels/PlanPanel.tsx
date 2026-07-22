@@ -314,7 +314,19 @@ export function PlanPanel() {
                   title="hard bearing for the laterals, 0-180 deg (0 = N-S, 90 = E-W) — e.g. run down the long axis of a half-section instead of the offset grid; empty = auto"
                   style={{ color: params.azimuth_deg != null ? "var(--accent)" : undefined }}
                 >
-                  azimuth override (deg)
+                  azimuth (deg){params.azimuth_deg != null ? " · override" : " · auto"}
+                  {params.azimuth_deg != null && (
+                    <>
+                      {" "}
+                      <span
+                        onClick={() => setParam("azimuth_deg", null)}
+                        style={{ cursor: "pointer", textDecoration: "underline" }}
+                        title="clear the override (back to the sourced grid azimuth / long axis)"
+                      >
+                        reset
+                      </span>
+                    </>
+                  )}
                 </label>
                 <input type="number" step={0.1} min={0} max={180} style={{ width: 80 }}
                   value={params.azimuth_deg ?? ""}
