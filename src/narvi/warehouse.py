@@ -748,6 +748,89 @@ def inventory_from_warehouse(
     return [w for w, _ in all_items]
 
 
+# ---------------------------------------------------------------------------
+# Workbook-handoff category (PDP / PUD / UPSIDE) — the inventory tab's
+# `category` column in the Blue Ox curve-drop workbook.
+# ---------------------------------------------------------------------------
+
+# PUD needs >= this many qualifying in-bench PDP offsets within 3 mi
+# (agreed rule, 2026-07-22); below (or unscored) is UPSIDE.
+HANDOFF_PUD_MIN_OFFSETS = 3
+HANDOFF_CATEGORIES: tuple[str, ...] = ("PDP", "PUD", "UPSIDE")
+
+# Same qualifying-PDP gate as curated.intel_pdp_support (sql/30), evaluated
+# against a stick's own producing legs so GENERATED wells score identically to
+# curated ones: horizontal + same TVD-corrected formation_blueox + TVD +/- 500 ft
+# + >= 6 mo produced + real lateral, within 3 mi (4827 m). Base tables on
+# purpose (not wells_enriched) and the ::geography form that hits sql/26's
+# expression GiST index.
+_PDP_SUPPORT_3MI_SQL = """
+    SELECT count(*)
+    FROM curated.wells w
+    JOIN curated.formation_blueox fb2        ON fb2.api10 = w.api10
+    LEFT JOIN curated.formation_blueox_tvd t ON t.api10   = w.api10
+    WHERE ST_DWithin(w.wellstick_geom::geography, ST_GeogFromText(%(legs)s), 4827)
+      AND COALESCE(w.novi_slant_calculated, w.enverus_trajectory) ILIKE 'H%%'
+      AND COALESCE(t.corrected_code, fb2.formation_blueox) = %(formation)s
+      AND abs(w.tvd_ft - %(tvd)s) <= 500
+      AND w.first_production_date <= current_date - interval '6 months'
+      AND w.lateral_length_ft > 0
+"""
+
+
+def derive_handoff_category(well: InventoryWell) -> str:
+    """Auto classification: existing producers -> PDP; supported sticks
+    (pdp_count_3mi >= HANDOFF_PUD_MIN_OFFSETS) -> PUD; thin/unscored -> UPSIDE."""
+    if well.category == "pdp":
+        return "PDP"
+    if (well.pdp_count_3mi is not None
+            and well.pdp_count_3mi >= HANDOFF_PUD_MIN_OFFSETS):
+        return "PUD"
+    return "UPSIDE"
+
+
+def pdp_support_count_3mi(
+    conn: psycopg.Connection, well: InventoryWell
+) -> int | None:
+    """Qualifying-PDP offset count within 3 mi of the well's producing legs.
+
+    None when the well can't be scored (no TVD or no legs — mirrors sql/30's
+    scorable guard, so 0 always means genuinely unsupported). The bench code is
+    normalized by stripping the wine-rack bimodal suffix (`WCA_1_b` -> `WCA_1`)
+    so split benches still match warehouse formation_blueox codes."""
+    if not well.target_tvd_ft or not well.legs:
+        return None
+    formation = well.formation[:-2] if well.formation.endswith("_b") else well.formation
+    parts = []
+    for leg in well.legs:
+        (h_lon, h_lat), (t_lon, t_lat) = leg.heel_lonlat, leg.toe_lonlat
+        parts.append(f"({h_lon} {h_lat}, {t_lon} {t_lat})")
+    legs_ewkt = "SRID=4326;MULTILINESTRING(" + ", ".join(parts) + ")"
+    with conn.cursor() as cur:
+        cur.execute(
+            _PDP_SUPPORT_3MI_SQL,
+            {"legs": legs_ewkt, "formation": formation, "tvd": well.target_tvd_ft},
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row else None
+
+
+def apply_handoff_support(
+    conn: psycopg.Connection | None, wells: list[InventoryWell]
+) -> None:
+    """Fill pdp_count_3mi (where unscored) and handoff_category (where unset)
+    in place. Context wells are background-only and skipped. With no
+    connection, only the DB-free derivation runs (curated sticks already carry
+    their matview counts; generated wells stay unscored -> UPSIDE)."""
+    for w in wells:
+        if w.context:
+            continue
+        if conn is not None and w.category != "pdp" and w.pdp_count_3mi is None:
+            w.pdp_count_3mi = pdp_support_count_3mi(conn, w)
+        if w.handoff_category is None:
+            w.handoff_category = derive_handoff_category(w)
+
+
 def bench_summary(wells: list[InventoryWell]) -> list[BenchInfo]:
     """Bench menu derived from a kept inventory set, so the panel and the map agree
     exactly. Counts per category + median landing TVD per formation_blueox; spacing

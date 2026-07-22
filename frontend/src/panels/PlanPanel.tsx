@@ -44,6 +44,7 @@ export function PlanPanel() {
     parcel, parcels, scenarios, inventory, benchSource, cats, culledWells,
     params, sourceAzimuth, benchSpacing, benchTvd, result, loading, error,
     feasibility, scan, scanning, runScan, adoptConfig,
+    categoryOverrides, toggleCategoryOverride,
     selectParcel, renameParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
     toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, generate,
   } = s;
@@ -237,6 +238,93 @@ export function PlanPanel() {
           </div>
         )}
       </div>
+
+      {planPts.length > 0 && (() => {
+        // Workbook-handoff categories: one row per PLANNED well (dedupe legs),
+        // grouped by bench in TVD order. Auto = server scoring (pdp_count_3mi
+        // >= 3 -> PUD); clicking the chip flips PUD/UPSIDE (an override, same
+        // estimate-then-override pattern as the bench TVD field). PDP wells are
+        // existing producers — counted, never editable.
+        type HW = { name: string; auto: "PUD" | "UPSIDE"; eff: "PUD" | "UPSIDE";
+                    overridden: boolean; n3: number | null };
+        const seen = new Set<string>();
+        const byBench = new Map<string, HW[]>();
+        const pdpByBench = new Map<string, number>();
+        for (const p of gb?.points ?? []) {
+          if (seen.has(p.well_name)) continue;
+          seen.add(p.well_name);
+          if (p.category === "pdp") {
+            if (!p.context || cats.pdp) {
+              pdpByBench.set(p.formation, (pdpByBench.get(p.formation) ?? 0) + 1);
+            }
+            continue;
+          }
+          if (p.context) continue;
+          const auto: "PUD" | "UPSIDE" = p.handoff_category === "PUD" ? "PUD" : "UPSIDE";
+          const eff = categoryOverrides[p.well_name] ?? auto;
+          const list = byBench.get(p.formation) ?? [];
+          list.push({ name: p.well_name, auto, eff,
+                      overridden: categoryOverrides[p.well_name] != null,
+                      n3: p.pdp_count_3mi ?? null });
+          byBench.set(p.formation, list);
+        }
+        const order = [
+          ...rows.map((r) => r.formation).filter((f) => byBench.has(f)),
+          ...[...byBench.keys()].filter((f) => !rows.some((r) => r.formation === f)),
+        ];
+        const chip = (w: HW) => (
+          <button
+            onClick={() => toggleCategoryOverride(w.name, w.auto)}
+            title={`auto: ${w.auto}${w.n3 != null ? ` (${w.n3} PDP offsets @3mi)` : " (unscored)"} — click to flip`}
+            style={{
+              width: 64, fontSize: 10, fontWeight: 600, cursor: "pointer",
+              border: `1px solid ${w.eff === "PUD" ? "#16a34a" : "#d97706"}`,
+              color: w.eff === "PUD" ? "#166534" : "#92400e",
+              background: w.eff === "PUD" ? "#f0fdf4" : "#fffbeb",
+              borderRadius: 4, padding: "1px 0",
+            }}
+          >
+            {w.eff}{w.overridden ? " *" : ""}
+          </button>
+        );
+        return (
+          <div className="section">
+            <h2>Handoff</h2>
+            <div className="note" style={{ marginTop: 0 }}>
+              workbook categories — PUD = ≥3 PDP offsets @3mi, UPSIDE = thin/unscored;
+              click a chip to flip (* = your override)
+            </div>
+            {order.map((f) => {
+              const wells = byBench.get(f) ?? [];
+              const nPud = wells.filter((w) => w.eff === "PUD").length;
+              const nUp = wells.length - nPud;
+              const nPdp = pdpByBench.get(f) ?? 0;
+              return (
+                <details key={f} style={{ marginBottom: 4 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 12, listStylePosition: "inside" }}>
+                    <i className="swatch" style={{ background: colorForBlueox(f) }} />
+                    {" "}{f}
+                    <span style={{ color: "var(--muted)", fontSize: 10 }}>
+                      {" "}· {nPud} PUD · {nUp} UPSIDE{nPdp > 0 ? ` · ${nPdp} PDP` : ""}
+                    </span>
+                  </summary>
+                  {wells.map((w) => (
+                    <div className="field" key={w.name} style={{ paddingLeft: 16 }}>
+                      <label style={{ fontSize: 11 }}>
+                        {w.name}
+                        <span style={{ color: "var(--muted)", fontSize: 10 }}>
+                          {w.n3 != null ? ` · ${w.n3} @3mi` : " · unscored"}
+                        </span>
+                      </label>
+                      {chip(w)}
+                    </div>
+                  ))}
+                </details>
+              );
+            })}
+          </div>
+        );
+      })()}
 
       {inventory && (
         <div className="section">

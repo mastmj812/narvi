@@ -17,7 +17,12 @@ from narvi import (
     parcel_from_geojson,
     scenario_geojson,
 )
-from narvi.warehouse import get_connection, section_azimuth, zones_from_warehouse
+from narvi.warehouse import (
+    apply_handoff_support,
+    get_connection,
+    section_azimuth,
+    zones_from_warehouse,
+)
 
 from .models import GenerateRequest, GenerateResponse
 
@@ -33,7 +38,7 @@ def run_generate(req: GenerateRequest):
     # lease line), so we don't source a grid azimuth — the engine derives it from the
     # edge. Only hit the DB for the azimuth when no line anchor is chosen.
     anchor_defines_az = p.anchor in ("west", "east")
-    needs_db = (req.source_azimuth and not anchor_defines_az) or (
+    needs_db = req.score_support or (req.source_azimuth and not anchor_defines_az) or (
         req.mode == "winerack" and req.source_tvd and not req.zones)
     conn = get_connection() if needs_db else None
     sourced_az: float | None = None
@@ -88,6 +93,18 @@ def run_generate(req: GenerateRequest):
                     f"grid azimuth {sourced_az:.1f} deg places NO wells here — fell back "
                     f"to the parcel long axis ({used:.1f} deg). CROSS-GRID to offset "
                     f"development; set the azimuth override to force the grid.")
+
+        # Handoff classification (PDP/PUD/UPSIDE for the workbook inventory
+        # tab): score generated sticks against the sql/30 qualifying-PDP gate
+        # and derive categories, so the UI shows what the drop will say. Runs
+        # on the FINAL well set (after any cross-grid fallback).
+        if req.score_support:
+            apply_handoff_support(conn, wells)
+            n_pud = sum(1 for w in wells if w.handoff_category == "PUD")
+            notes.append(
+                f"handoff scoring: {n_pud} PUD / {len(wells) - n_pud} UPSIDE "
+                f"(pdp_count_3mi >= 3 -> PUD; override per well before save)"
+            )
     finally:
         if conn is not None:
             conn.close()

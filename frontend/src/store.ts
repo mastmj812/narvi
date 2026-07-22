@@ -129,6 +129,9 @@ export function buildRequestFrom(
   return {
     parcel: s.parcel.geojson, params: s.params, mode: "winerack",
     zones, source_azimuth: s.sourceAzimuth, buffer_ft: 5280,
+    // score fresh sticks so the gun-barrel shows the handoff category (the
+    // same PDP/PUD/UPSIDE the workbook inventory tab will carry)
+    score_support: true,
   };
 }
 
@@ -246,6 +249,10 @@ interface State {
   benchSource: Record<string, BenchSource>;
   cats: Record<Category, boolean>;
   culledWells: string[];           // per-well cull (by well_name) — hidden from map/export
+  // per-well handoff-category override (well_name -> PUD | UPSIDE). Auto value
+  // comes from the server (pdp_count_3mi >= 3 -> PUD); shift-click on the
+  // gun-barrel toggles. Applied server-side at save (PDP wells not overridable).
+  categoryOverrides: Record<string, "PUD" | "UPSIDE">;
 
   // generator (deal-level params; per-bench TVD/spacing live on the bench rows)
   params: Params;
@@ -293,6 +300,10 @@ interface State {
   toggleCat: (c: Category) => void;
   toggleCull: (wellName: string) => void;
   restoreAllCulled: () => void;
+  // toggle the PUD/UPSIDE override for a planned well; `auto` is the server's
+  // classification (the toggle flips away from the effective value, and
+  // clearing back to the auto value removes the override entirely)
+  toggleCategoryOverride: (wellName: string, auto: "PUD" | "UPSIDE") => void;
 
   setParam: <K extends keyof Params>(k: K, v: Params[K]) => void;
   setSourceAzimuth: (v: boolean) => void;
@@ -319,6 +330,7 @@ const PARCEL_RESET = {
   benchSource: {} as Record<string, BenchSource>, benchSpacing: {} as Record<string, number>,
   benchTvd: {} as Record<string, number>, culledWells: [] as string[],
   feasibility: null, scan: null, scanning: false,
+  categoryOverrides: {} as Record<string, "PUD" | "UPSIDE">,
   lastGenKey: null, loaded: null, error: null,
 };
 
@@ -335,6 +347,7 @@ export const useStore = create<State>((set, get) => ({
   benchSource: {},
   cats: { pdp: true, pud: true, res: false },
   culledWells: [],
+  categoryOverrides: {},
 
   params: { ...DEFAULT_PARAMS },
   sourceAzimuth: true,
@@ -467,6 +480,17 @@ export const useStore = create<State>((set, get) => ({
     })),
   restoreAllCulled: () => set({ culledWells: [] }),
 
+  toggleCategoryOverride: (wellName, auto) =>
+    set((s) => {
+      const overrides = { ...s.categoryOverrides };
+      const effective = overrides[wellName] ?? auto;
+      const next = effective === "PUD" ? "UPSIDE" : "PUD";
+      // flipping back to the auto value clears the override (auto stays live)
+      if (next === auto) delete overrides[wellName];
+      else overrides[wellName] = next;
+      return { categoryOverrides: overrides };
+    }),
+
   setParam: (k, v) => set((s) => ({ params: { ...s.params, [k]: v } })),
   setSourceAzimuth: (sourceAzimuth) => set({ sourceAzimuth }),
   setBenchSpacing: (f, v) => set((s) => ({ benchSpacing: { ...s.benchSpacing, [f]: v } })),
@@ -512,6 +536,7 @@ export const useStore = create<State>((set, get) => ({
         bench_sources: s.benchSource,
         categories: (["pdp", "pud", "res"] as Category[]).filter((c) => s.cats[c]),
         culled_wells: s.culledWells,
+        category_overrides: s.categoryOverrides,
         params: s.params,
         zones: zonesForGenerate(s),
         source_azimuth: s.sourceAzimuth,
@@ -556,7 +581,11 @@ export const useStore = create<State>((set, get) => ({
             .map((z) => [z.formation, z.spacing_ft as number])),
         });
         await get().fetchInventory({ seed: false });
-        set({ culledWells: cs.culled_wells ?? [], loading: false });
+        set({
+          culledWells: cs.culled_wells ?? [],
+          categoryOverrides: cs.category_overrides ?? {},
+          loading: false,
+        });
         if (Object.values(cs.bench_sources ?? {}).includes("generate")) {
           await get().generate();
         }

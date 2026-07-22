@@ -7,38 +7,47 @@ const M = { l: 46, r: 12, t: 10, b: 22 };
 
 type Pt = GunbarrelData["points"][number];
 
-// Existing (PDP) = solid circle; planned (PUD + generated) = hollow (white)
-// circle; RES = hollow triangle; color = formation_blueox (erebor convention).
-// Click culls the well: culled wells disappear everywhere (chart, map, counts)
-// and the TVD axis rescales without them. Restore: PDP via its stick on the
-// basin-wide map layer; anything via "restore all" in the scenario bar.
-// PDP are existing wells shown for spacing reference — they render solid + full
-// opacity in both modes (in override they merge in as reference but stay out of
-// the planned well/leg count). Only a genuinely non-PDP offset point renders
-// small + faded (reserved for a future offset-context source).
-function Marker({ p, cx, cy, color, on, onToggle }: {
-  p: Pt; cx: number; cy: number; color: string;
+// Symbology keys on the HANDOFF category (what the workbook inventory tab will
+// say): existing producer (PDP) = solid circle; PUD = hollow (white) circle;
+// UPSIDE = hollow star. Color = formation_blueox (erebor convention).
+// Click culls the well; shift-click flips a planned well's PUD/UPSIDE.
+// Restore culls: PDP via its stick on the basin-wide map layer; anything via
+// "restore all" in the scenario bar. PDP are existing wells shown for spacing
+// reference — solid + full opacity, out of the planned well/leg count. Only a
+// genuinely non-PDP offset point renders small + faded.
+function starPoints(cx: number, cy: number, r: number): string {
+  const pts: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const a = (Math.PI / 5) * i - Math.PI / 2;
+    const rr = i % 2 === 0 ? r : r * 0.45;
+    pts.push(`${cx + rr * Math.cos(a)},${cy + rr * Math.sin(a)}`);
+  }
+  return pts.join(" ");
+}
+
+function Marker({ p, eff, cx, cy, color, on, onToggle }: {
+  p: Pt; eff: "PDP" | "PUD" | "UPSIDE"; cx: number; cy: number; color: string;
   on: (p: Pt | null, e?: React.MouseEvent) => void;
-  onToggle: (p: Pt) => void;
+  onToggle: (p: Pt, e: React.MouseEvent) => void;
 }) {
   const faded = p.context && p.category !== "pdp";
   const r = faded ? 3 : 4;
-  const hollow = p.category === "pud" || p.category === "res" || p.category === "generated";
+  const solid = eff === "PDP";
   const paint = {
-    fill: hollow ? "#ffffff" : color,
-    stroke: hollow ? color : "#3f3f46",
-    strokeWidth: hollow ? 1.5 : 0.7,
-    opacity: faded ? 0.35 : p.category === "res" ? 0.85 : 1,
+    fill: solid ? color : "#ffffff",
+    stroke: solid ? "#3f3f46" : color,
+    strokeWidth: solid ? 0.7 : 1.5,
+    opacity: faded ? 0.35 : 1,
   };
   const h = {
     onMouseEnter: (e: React.MouseEvent) => on(p, e),
     onMouseMove: (e: React.MouseEvent) => on(p, e),
     onMouseLeave: () => on(null),
-    onClick: () => onToggle(p),
+    onClick: (e: React.MouseEvent) => onToggle(p, e),
     style: { cursor: "pointer" as const },
   };
-  const shape = p.category === "res"
-    ? <polygon points={`${cx},${cy - r} ${cx - r},${cy + r} ${cx + r},${cy + r}`} {...paint} {...h} />
+  const shape = eff === "UPSIDE"
+    ? <polygon points={starPoints(cx, cy, r + 2)} {...paint} {...h} />
     : <circle cx={cx} cy={cy} r={r} {...paint} {...h} />;
   return (
     <g>
@@ -48,20 +57,20 @@ function Marker({ p, cx, cy, color, on, onToggle }: {
   );
 }
 
-function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
-  const flipX = x > window.innerWidth - 230;
-  const flipY = y > window.innerHeight - 160;
+function Tooltip({ p, x, y, handoff }: { p: Pt; x: number; y: number; handoff?: string }) {
+  const flipX = x > window.innerWidth - 500;
+  const flipY = y > window.innerHeight - 320;
   const style: React.CSSProperties = {
     ...(flipX ? { right: window.innerWidth - x + 14 } : { left: x + 14 }),
     ...(flipY ? { bottom: window.innerHeight - y + 14 } : { top: y + 14 }),
   };
   const row = (k: string, v: string) => (
-    <tr><td style={{ color: "#9ca3af", paddingRight: 8 }}>{k}</td><td>{v}</td></tr>
+    <tr><td style={{ color: "#9ca3af", paddingRight: 14 }}>{k}</td><td>{v}</td></tr>
   );
   return (
     <div className="gb-tip" style={style}>
-      <div style={{ fontWeight: 600, marginBottom: 3 }}>{p.novi_wellname ?? p.well_name}</div>
-      <table style={{ fontSize: 11, borderCollapse: "collapse" }}>
+      <div style={{ fontWeight: 600, marginBottom: 5, fontSize: 24 }}>{p.novi_wellname ?? p.well_name}</div>
+      <table style={{ fontSize: 22, borderCollapse: "collapse" }}>
         <tbody>
           {row("Category", p.category.toUpperCase())}
           {p.context && p.category !== "pdp" ? row("Role", "offset context") : null}
@@ -69,10 +78,11 @@ function Tooltip({ p, x, y }: { p: Pt; x: number; y: number }) {
           {p.recon_status ? row("Status", p.recon_status.replace(/_/g, " ")) : null}
           {row("TVD", `${Math.round(p.tvd_ft).toLocaleString()} ft`)}
           {row("Offset", `${Math.round(p.offset_ft).toLocaleString()} ft`)}
-          {(p.category === "pud" || p.category === "res") && p.pdp_count_3mi != null
+          {p.category !== "pdp" && p.pdp_count_3mi != null
             ? row("PDP support", `${p.pdp_count_3mi} offsets @3mi`) : null}
           {(p.category === "pud" || p.category === "res") && p.inflation_ratio != null
             ? row("EUR/ft vs offsets", `${p.inflation_ratio.toFixed(2)}×`) : null}
+          {handoff ? row("Handoff", handoff) : null}
         </tbody>
       </table>
     </div>
@@ -86,6 +96,8 @@ export function GunBarrel() {
   const cats = useStore((s) => s.cats);
   const culledWells = useStore((s) => s.culledWells);
   const toggleCull = useStore((s) => s.toggleCull);
+  const categoryOverrides = useStore((s) => s.categoryOverrides);
+  const toggleCategoryOverride = useStore((s) => s.toggleCategoryOverride);
   const gbFlip = useStore((s) => s.gbFlip);
   const toggleGbFlip = useStore((s) => s.toggleGbFlip);
   const supportColor = useStore((s) => s.supportColor);
@@ -173,6 +185,28 @@ export function GunBarrel() {
       ? colorForSupport(p.pdp_count_3mi)
       : colorForBlueox(p.formation);
 
+  // Workbook-handoff category: auto from the server (pdp_count_3mi >= 3 ->
+  // PUD), user override on top. Shift-click toggles PUD/UPSIDE on a planned
+  // well; existing producers are PDP, fixed.
+  const autoOf = (p: Pt): "PUD" | "UPSIDE" =>
+    p.handoff_category === "PUD" ? "PUD" : "UPSIDE";
+  const effOf = (p: Pt): "PDP" | "PUD" | "UPSIDE" =>
+    p.category === "pdp" ? "PDP" : (categoryOverrides[p.well_name] ?? autoOf(p));
+  const handoffLabel = (p: Pt): string | undefined => {
+    if (p.context) return undefined;
+    if (p.category === "pdp") return "PDP (existing producer)";
+    const o = categoryOverrides[p.well_name];
+    return o ? `${o} (override — ⇧-click to toggle)` : `${autoOf(p)} (auto — ⇧-click to toggle)`;
+  };
+  const onMarker = (pt: Pt, e: React.MouseEvent) => {
+    if (e.shiftKey && pt.category !== "pdp" && !pt.context) {
+      toggleCategoryOverride(pt.well_name, autoOf(pt));
+    } else {
+      toggleCull(pt.well_name);
+    }
+  };
+  const nOverrides = Object.keys(categoryOverrides).length;
+
   return (
     <div className="floatwin gb-win" style={{ left: pos.x, top: pos.y }}>
       <div className="win-head" onMouseDown={onHeadDown}>
@@ -181,6 +215,7 @@ export function GunBarrel() {
           {keptPts.length - keptLinks.length} wells / {keptPts.length} legs
           {pdpCount > 0 && <span style={{ color: "#a1a1aa" }}> · {pdpCount} PDP</span>}
           {culledSet.size > 0 && <span style={{ color: "#a1a1aa" }}> · {culledSet.size} culled</span>}
+          {nOverrides > 0 && <span style={{ color: "#a1a1aa" }}> · {nOverrides} recat</span>}
         </span>
         <button
           title="flip orientation (mirror the x-axis)"
@@ -205,9 +240,9 @@ export function GunBarrel() {
               stroke={colorForBlueox(l.formation)} strokeWidth={1} opacity={0.5} />
           ))}
           {gb.points.map((p, i) => (
-            <Marker key={`p${i}`} p={p} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
+            <Marker key={`p${i}`} p={p} eff={effOf(p)} cx={sx(p.offset_ft)} cy={sy(p.tvd_ft)}
               color={colorOf(p)}
-              on={onHover} onToggle={(pt) => toggleCull(pt.well_name)} />
+              on={onHover} onToggle={onMarker} />
           ))}
           <text x={M.l - 5} y={M.t + 6} textAnchor="end" fontSize={9} fill="#71717a">{minY.toFixed(0)}</text>
           <text x={M.l - 5} y={H - M.b} textAnchor="end" fontSize={9} fill="#71717a">{maxY.toFixed(0)}</text>
@@ -221,8 +256,9 @@ export function GunBarrel() {
         </svg>
       </div>
       <div className="gb-foot">
-        <span>● PDP</span><span>○ planned (PUD / gen)</span><span>△ RES</span>
+        <span>● PDP</span><span>○ PUD</span><span>✶ UPSIDE</span>
         <span>· color = {supportColor ? "PDP support (offsets @3mi)" : "bench"}</span>
+        <span style={{ color: "#a1a1aa" }}>· click = cull · ⇧-click = PUD/UPSIDE</span>
         {hasFaded && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
         {hiddenPdp > 0 && (
           <span style={{ color: "#a1a1aa" }}>· {hiddenPdp} PDP hidden — click its stick on the map to restore</span>
@@ -235,7 +271,7 @@ export function GunBarrel() {
               <span key={f.formation}><i className="swatch" style={{ background: f.color }} />{f.formation}</span>
             ))}
       </div>
-      {hover && <Tooltip p={hover.p} x={hover.x} y={hover.y} />}
+      {hover && <Tooltip p={hover.p} x={hover.x} y={hover.y} handoff={handoffLabel(hover.p)} />}
     </div>
   );
 }

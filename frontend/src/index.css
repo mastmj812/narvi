@@ -108,8 +108,8 @@ button.ghost {
 .gb-foot span { display: inline-flex; align-items: center; gap: 3px; }
 .gb-tip {
   position: fixed; z-index: 20; pointer-events: none;
-  background: rgba(17,24,39,.96); color: #f9fafb; padding: 6px 9px;
-  border-radius: 6px; box-shadow: 0 4px 14px rgba(0,0,0,.3); max-width: 240px;
+  background: rgba(17,24,39,.96); color: #f9fafb; padding: 10px 14px;
+  border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.3); max-width: 480px;
 }
 .gb-tip td { padding: 0; }
 /* map hover tooltip (maplibre popup content) */

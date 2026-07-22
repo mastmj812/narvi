@@ -191,3 +191,36 @@ def test_sourced_grid_azimuth_zero_wells_falls_back_to_long_axis(monkeypatch):
     d2 = r2.json()
     assert d2["placed_wells"] == 0
     assert not any("CROSS-GRID" in n for n in d2["warehouse_notes"])
+
+
+def test_classify_for_handoff_overrides():
+    """Override application: planned wells flip PUD/UPSIDE; PDP wells and
+    unknown names are a 400 (never silently dropped)."""
+    import pytest
+    from fastapi import HTTPException
+
+    from app.api.scenarios import _classify_for_handoff
+    from narvi.records import InventoryWell, Leg
+
+    def w(name, category="generated", pdp_count_3mi=None):
+        leg = Leg(heel_xy=(0.0, 0.0), toe_xy=(3000.0, 0.0), heel_lonlat=(-103.8, 31.9),
+                  toe_lonlat=(-103.77, 31.9), length_ft=9842.5, gunbarrel_x_ft=0.0)
+        return InventoryWell(
+            scenario_id="s", deal_id="d", well_name=name, well_type="single",
+            formation="WCA_1", target_tvd_ft=11500.0, lateral_azimuth_deg=90.0,
+            legs=[leg], turn=None, completed_lateral_ft=9842.5,
+            drilled_lateral_ft=9842.5, nearest_neighbor_spacing_ft=880.0,
+            setback_ft=330.0, category=category, pdp_count_3mi=pdp_count_3mi)
+
+    # None conn -> DB-free derivation only (counts already present or absent)
+    wells = [w("gen1", pdp_count_3mi=5), w("gen2", pdp_count_3mi=0), w("prod", category="pdp")]
+    _classify_for_handoff(None, wells, {"gen1": "UPSIDE"})
+    assert [x.handoff_category for x in wells] == ["UPSIDE", "UPSIDE", "PDP"]
+
+    with pytest.raises(HTTPException) as exc:
+        _classify_for_handoff(None, [w("gen1")], {"nope": "PUD"})
+    assert "unknown well" in exc.value.detail
+
+    with pytest.raises(HTTPException) as exc:
+        _classify_for_handoff(None, [w("prod", category="pdp")], {"prod": "PUD"})
+    assert "PDP is fixed" in exc.value.detail
