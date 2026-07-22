@@ -15,7 +15,12 @@ from narvi import (
     synthetic_section,
 )
 from narvi.viz import _to_wgs_geom
-from narvi.warehouse import available_benches, bench_summary, inventory_from_warehouse
+from narvi.warehouse import (
+    apply_handoff_support,
+    available_benches,
+    bench_summary,
+    inventory_from_warehouse,
+)
 
 from ..deps import get_conn
 from ..models import (
@@ -41,6 +46,9 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     # near-parcel PDP comes back flagged context=true (visual background only).
     wells = inventory_from_warehouse(conn, parcel, req.buffer_ft, tuple(req.categories),
                                      context_radius_ft=req.context_radius_ft)
+    # Handoff classification for display (PDP/PUD/UPSIDE). DB-free pass:
+    # curated pud/res sticks already carry their intel_pdp_support counts.
+    apply_handoff_support(None, wells)
     unit_wells = [w for w in wells if not w.context]
     benches = bench_summary(unit_wells)                     # overlap inventory -> curate
     # Override designs NEW development, so its menu is the AREA's developable benches

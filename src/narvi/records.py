@@ -109,11 +109,20 @@ class InventoryWell:
     # §6 reconciliation status for PUD pass-through (remaining_pud | conflict);
     # realized_* PUDs are filtered out upstream (already drilled, not inventory).
     recon_status: str | None = None
-    # Offset-PDP support (curated.intel_pdp_support, sql/30) for pud/res sticks —
-    # verifiability of Novi's forecast, NOT re-persisted (a live warehouse read on
-    # the curate baseline). None for pdp / generated / not-scorable sticks.
-    pdp_count_3mi: int | None = None      # qualifying in-bench PDP offsets within 3 mi
+    # Offset-PDP support: qualifying in-bench PDP offsets within 3 mi. Sourced
+    # from curated.intel_pdp_support (sql/30) for pud/res sticks; computed with
+    # the SAME gate against the stick's own legs for generated wells
+    # (warehouse.apply_handoff_support). Persists via `detail` — it is the
+    # provenance of the auto handoff category below. None = not scored.
+    pdp_count_3mi: int | None = None
     inflation_ratio: float | None = None  # Novi PUD EUR/ft vs offset median EUR/ft
+    # Workbook-handoff classification (the inventory tab's `category` column):
+    # 'PDP' (existing producer) / 'PUD' (pdp_count_3mi >= 3) / 'UPSIDE' (<= 2 or
+    # unscored). Auto-derived (warehouse.derive_handoff_category) and USER-
+    # OVERRIDABLE in the UI — same estimate-then-override pattern as landing TVD.
+    # Persists via `detail`; the anduin Blue Ox exporter reads it and it wins
+    # over the exporter's own fallback derivation.
+    handoff_category: str | None = None
 
 
 @dataclass
