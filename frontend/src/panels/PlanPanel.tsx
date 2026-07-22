@@ -315,23 +315,32 @@ export function PlanPanel() {
             </select>
           </div>
           <div className="field">
-            <label title="where the row pattern hangs across the unit">anchor</label>
+            <label title={"where the row pattern hangs across the unit. West/east LINE anchors derive "
+              + "the azimuth from that lease line, so they're disabled while an azimuth override is set "
+              + "(auto still tries edge-hung patterns at the overridden bearing)."}>anchor</label>
             <select value={params.anchor} onChange={(e) => setParam("anchor", e.target.value as Params["anchor"])}>
               <option value="auto">auto (max footage)</option>
-              <option value="west">west line</option>
-              <option value="east">east line</option>
+              <option value="west" disabled={params.azimuth_deg != null}>west line</option>
+              <option value="east" disabled={params.azimuth_deg != null}>east line</option>
               <option value="center">center</option>
             </select>
           </div>
           {params.well_type === "uturn" && (
-            <div className="field">
-              <label title="which side the pads/heels go; the U-turn sits at the opposite end">drill from</label>
-              <select value={params.drill_from} onChange={(e) => setParam("drill_from", e.target.value as Params["drill_from"])}>
-                <option value="auto">auto (max footage)</option>
-                <option value="north">north</option>
-                <option value="south">south</option>
-              </select>
-            </div>
+            <>
+              <div className="field">
+                <label title="which side the pads/heels go; the U-turn sits at the opposite end">drill from</label>
+                <select value={params.drill_from} onChange={(e) => setParam("drill_from", e.target.value as Params["drill_from"])}>
+                  <option value="auto">auto (max footage)</option>
+                  <option value="north">north</option>
+                  <option value="south">south</option>
+                </select>
+              </div>
+              <NumberField
+                label="U-turn floor (ft)" k="uturn_min_leg_to_leg_ft" step={10}
+                title={"tightest drillable turn: leg-to-leg spacing = turn diameter (radius = half). "
+                  + "Pairs spaced under this fall back to singles — lower it to U-turn tighter rows."}
+              />
+            </>
           )}
           {(params.anchor === "west" || params.anchor === "east") ? (
             <div className="field">

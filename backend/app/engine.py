@@ -36,6 +36,7 @@ def run_generate(req: GenerateRequest):
     needs_db = (req.source_azimuth and not anchor_defines_az) or (
         req.mode == "winerack" and req.source_tvd and not req.zones)
     conn = get_connection() if needs_db else None
+    sourced_az: float | None = None
     try:
         if anchor_defines_az:
             notes.append(f"grid azimuth from the {p.anchor} lease line "
@@ -44,6 +45,7 @@ def run_generate(req: GenerateRequest):
             az = section_azimuth(conn, parcel, req.buffer_ft)
             if az is not None:
                 p = replace(p, azimuth_deg=az)
+                sourced_az = az
                 notes.append(f"adopted offset-well grid azimuth {az:.1f} deg")
             else:
                 notes.append("grid azimuth not confident; using parcel long axis")
@@ -59,11 +61,33 @@ def run_generate(req: GenerateRequest):
                 raise ValueError("winerack mode needs `zones`, or `source_tvd` + `formations`")
             if not zones:
                 raise ValueError("no benches with sufficient warehouse control in the AOI")
-            wells, window, rep = generate_wine_rack(parcel, p, zones)
-            summary = rep.note
         else:
-            wells, window, feas = generate_scenario(parcel, p)
-            summary = feas.note
+            zones = None
+
+        def _run(pp):
+            if zones is not None:
+                ws, win, rep = generate_wine_rack(parcel, pp, zones)
+                return ws, win, rep.note
+            ws, win, feas = generate_scenario(parcel, pp)
+            return ws, win, feas.note
+
+        wells, window, summary = _run(p)
+
+        # Feasibility-aware fallback: a SOURCED grid azimuth that places nothing
+        # (e.g. N-S grid on a half-mile-deep tract) is the app confidently doing
+        # the wrong thing. Retry on the parcel long axis and say so LOUDLY —
+        # cross-grid development is a real decision, so it's flagged, not silent.
+        # A user-stipulated azimuth is never second-guessed (sourced_az only).
+        if not wells and sourced_az is not None:
+            p2 = replace(p, azimuth_deg=None)
+            wells2, window2, summary2 = _run(p2)
+            if wells2:
+                p, wells, window, summary = p2, wells2, window2, summary2
+                used = wells[0].lateral_azimuth_deg
+                notes.append(
+                    f"grid azimuth {sourced_az:.1f} deg places NO wells here — fell back "
+                    f"to the parcel long axis ({used:.1f} deg). CROSS-GRID to offset "
+                    f"development; set the azimuth override to force the grid.")
     finally:
         if conn is not None:
             conn.close()

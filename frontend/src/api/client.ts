@@ -19,6 +19,9 @@ export interface Params {
   anchor: Anchor;
   azimuth_deg: number | null;
   min_lateral_ft: number;
+  // tightest drillable U-turn (leg-to-leg = turn diameter); pairs under it fall
+  // back to singles. Optional so pre-existing saved recipes restore cleanly.
+  uturn_min_leg_to_leg_ft?: number;
 }
 
 export interface GenerateRequest {

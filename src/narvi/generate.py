@@ -334,7 +334,9 @@ def _best_azimuth(window: BaseGeometry, p: ScenarioParams) -> float:
 def _resolve_azimuth(parcel: BaseGeometry, window: BaseGeometry, p: ScenarioParams) -> float:
     # A stipulated W/E anchor line DEFINES the azimuth: laterals run parallel to that
     # lease line. This overrides any sourced/long-axis azimuth so the development
-    # stays exactly parallel to the setback (no fractional-degree drift).
+    # stays exactly parallel to the setback (no fractional-degree drift). The UI
+    # hides the azimuth override while a line anchor is chosen, so the two
+    # stipulations never fight on screen.
     if p.anchor in ("west", "east"):
         edge_az = anchor_edge_azimuth(parcel, p.anchor)
         if edge_az is not None:

@@ -158,3 +158,36 @@ def test_scan_ranks_configs_and_reproduces():
         "mode": "single",
     }).json()
     assert g["placed_wells"] == w["wells"]
+
+
+def test_sourced_grid_azimuth_zero_wells_falls_back_to_long_axis(monkeypatch):
+    # Feasibility-aware auto-azimuth: a sourced grid bearing that places nothing
+    # retries the parcel long axis with a loud cross-grid note. Warehouse calls
+    # are stubbed so the test stays DB-free.
+    from app import engine as eng
+
+    monkeypatch.setattr(eng, "get_connection", lambda: None)
+    monkeypatch.setattr(eng, "section_azimuth", lambda conn, parcel, buf: 0.0)
+    r = client.post("/api/generate", json={
+        "parcel": _half_section_geojson(),
+        "params": {"spacing_ft": 880, "setback_ft": 330, "formation": "WCA_2",
+                   "target_tvd_ft": 11663},          # N-S grid -> rows < 4,000 ft
+        "mode": "single",
+        "source_azimuth": True,
+    })
+    assert r.status_code == 200
+    d = r.json()
+    assert d["placed_wells"] > 0                     # fallback placed E-W singles
+    assert abs(d["azimuth_deg"] - 90.0) < 1.0
+    assert any("CROSS-GRID" in n for n in d["warehouse_notes"])
+
+    # a user-STIPULATED azimuth is never second-guessed: explicit 0 deg stays 0
+    r2 = client.post("/api/generate", json={
+        "parcel": _half_section_geojson(),
+        "params": {"spacing_ft": 880, "setback_ft": 330, "formation": "WCA_2",
+                   "target_tvd_ft": 11663, "azimuth_deg": 0.0},
+        "mode": "single",
+    })
+    d2 = r2.json()
+    assert d2["placed_wells"] == 0
+    assert not any("CROSS-GRID" in n for n in d2["warehouse_notes"])

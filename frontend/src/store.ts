@@ -30,7 +30,7 @@ const DEFAULT_PARAMS: Params = {
   spacing_ft: 880, setback_ft: 330, setback_ns_ft: 330, setback_ew_ft: 330,
   formation: "WCA_1", target_tvd_ft: 11000,
   well_type: "single", objective: "max_lateral", drill_from: "auto", anchor: "auto",
-  azimuth_deg: null, min_lateral_ft: 4000,
+  azimuth_deg: null, min_lateral_ft: 4000, uturn_min_leg_to_leg_ft: 990,
 };
 
 export function dealIdFor(label: string): string {
@@ -43,7 +43,7 @@ export function dealIdFor(label: string): string {
 const SAVED_PARAM_KEYS = [
   "spacing_ft", "setback_ft", "setback_ns_ft", "setback_ew_ft", "formation",
   "target_tvd_ft", "well_type", "objective", "drill_from", "anchor",
-  "azimuth_deg", "min_lateral_ft",
+  "azimuth_deg", "min_lateral_ft", "uturn_min_leg_to_leg_ft",
 ] as const;
 
 function paramsFromScenario(sp: Record<string, unknown> | null | undefined): Partial<Params> {
