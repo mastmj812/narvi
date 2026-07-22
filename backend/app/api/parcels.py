@@ -13,16 +13,25 @@ from shapely.geometry import mapping
 from narvi import (
     gunbarrel_data,
     load_named_parcels,
+    parcel_feasibility,
     parcel_from_geojson,
     scenario_geojson,
     synthetic_section,
 )
 from narvi.viz import _to_wgs_geom
-from narvi.warehouse import available_benches, bench_summary, inventory_from_warehouse
+from narvi.warehouse import (
+    available_benches,
+    bench_summary,
+    inventory_from_warehouse,
+    section_azimuth,
+)
 
 from ..deps import get_conn
 from ..models import (
     BenchInfoModel,
+    DirectionFeasibilityModel,
+    FeasibilityRequest,
+    FeasibilityResponse,
     InventoryRequest,
     InventoryResponse,
     ParcelInfo,
@@ -64,6 +73,34 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
         benches=[_bm(b) for b in benches],
         dev_benches=[_bm(b) for b in dev],
     )
+
+
+@router.post("/feasibility", response_model=FeasibilityResponse)
+def feasibility(req: FeasibilityRequest) -> FeasibilityResponse:
+    """What each realistic bearing can hold in this parcel — the longest straight
+    row and the cross-axis room, for the offset-grid azimuth (confidence-gated)
+    and the parcel long axis. Drives the feasibility card + the scan's azimuth
+    candidates, so odd tracts (half-sections) stop failing silently. The pool is
+    only touched when the grid azimuth must be sourced (engine.py's lazy pattern),
+    so a stipulated-azimuth call stays DB-free."""
+    parcel = parcel_from_geojson(req.parcel)
+    grid = req.grid_azimuth_deg
+    if grid is None:
+        from .. import db
+
+        pool = db.pool if db.pool is not None else db.open_pool()
+        with pool.connection() as conn:
+            grid = section_azimuth(conn, parcel, req.buffer_ft)   # None if not confident
+    ns = req.setback_ns_ft if req.setback_ns_ft is not None else req.setback_ft
+    ew = req.setback_ew_ft if req.setback_ew_ft is not None else req.setback_ft
+    dirs = parcel_feasibility(parcel, ns, ew, grid_azimuth_deg=grid,
+                              min_lateral_ft=req.min_lateral_ft)
+    return FeasibilityResponse(directions=[
+        DirectionFeasibilityModel(
+            label=d.label, azimuth_deg=d.azimuth_deg, max_lateral_ft=d.max_lateral_ft,
+            cross_extent_ft=d.cross_extent_ft, note=d.note)
+        for d in dirs
+    ])
 
 
 @router.get("/synthetic", response_model=ParcelInfo)

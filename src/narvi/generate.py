@@ -404,17 +404,23 @@ def generate_scenario(
     for w in wells:
         w.lateral_azimuth_deg = round(az, 1)
     n_legs = sum(len(w.legs) for w in wells)
+    note = (f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
+            f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
+            f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
+            + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
+               f"floor -> singles]" if floored else "")
+            + (f"  [{dropped} short {'well' if uturn else 'lateral'}{'s' if dropped != 1 else ''} "
+               f"< {p.min_lateral_ft:.0f} ft dropped]" if dropped else ""))
+    if not wells:
+        # a bare zero reads as a generator failure — say what the geometry holds
+        # and which bearing would work (lazy import: feasibility uses this module)
+        from .feasibility import zero_well_hint
+        note += zero_well_hint(parcel, p, az)
     feas = Feasibility(
         requested=None, placed=len(wells), legs=n_legs, dropped=dropped,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
         total_drilled_ft=round(sum(w.drilled_lateral_ft for w in wells), 1),
-        note=(f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
-              f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
-              f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
-              + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
-                 f"floor -> singles]" if floored else "")
-              + (f"  [{dropped} short {'well' if uturn else 'lateral'}{'s' if dropped != 1 else ''} "
-                 f"< {p.min_lateral_ft:.0f} ft dropped]" if dropped else "")),
+        note=note,
     )
     return wells, window, feas
 
@@ -502,6 +508,10 @@ def generate_wine_rack(
 
     total_wells = sum(z.wells for z in zresults)
     total_legs = sum(z.legs for z in zresults)
+    zero_hint = ""
+    if total_wells == 0:
+        from .feasibility import zero_well_hint
+        zero_hint = zero_well_hint(parcel, replace(base, spacing_ft=lead_spacing), az)
     well_kind = "uturn" if any(w.turn for w in all_wells) else "single"
     # flag the floor per ZONE, at the spacing that placed that zone's wells
     floored_zs = [f"{z.formation} {sp:.0f}" for z, sp in zip(zs, z_spacings)
@@ -519,6 +529,7 @@ def generate_wine_rack(
               + (f"  [U-turn leg-to-leg < {base.uturn_min_leg_to_leg_ft:.0f} ft floor -> "
                  f"singles: {', '.join(floored_zs)}]" if floored_zs else "")
               + (f"  [{dropped_total} short well{'s' if dropped_total != 1 else ''} "
-                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped]" if dropped_total else "")),
+                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped]" if dropped_total else "")
+              + zero_hint),
     )
     return all_wells, window, report

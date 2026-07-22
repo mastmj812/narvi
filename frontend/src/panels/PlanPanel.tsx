@@ -43,6 +43,7 @@ export function PlanPanel() {
   const {
     parcel, parcels, scenarios, inventory, benchSource, cats, culledWells,
     params, sourceAzimuth, benchSpacing, benchTvd, result, loading, error,
+    feasibility, scan, scanning, runScan, adoptConfig,
     selectParcel, renameParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
     toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, generate,
   } = s;
@@ -240,6 +241,47 @@ export function PlanPanel() {
       {inventory && (
         <div className="section">
           <h2>Generator</h2>
+          {feasibility && feasibility.length > 0 && (
+            <div style={{ marginBottom: 6 }}>
+              {feasibility.map((d) => {
+                const tight = d.note.includes("min lateral");
+                return (
+                  <div key={d.label} className="note"
+                    style={{ marginTop: 0, color: tight ? "#b45309" : undefined }}
+                    title={d.note}>
+                    {d.label} {d.azimuth_deg.toFixed(1)}° — rows ≤ {Math.round(d.max_lateral_ft).toLocaleString()}′,
+                    {" "}{Math.round(d.cross_extent_ft).toLocaleString()}′ across{tight ? " · under min lateral" : ""}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <button className="ghost" disabled={scanning} onClick={() => runScan()}
+            title="sweep azimuth x well type x spacing through the placement engine and rank by completed footage">
+            {scanning ? "scanning…" : "Scan configurations"}
+          </button>
+          {scan && (
+            <div style={{ margin: "6px 0" }}>
+              {scan.length === 0 && (
+                <div className="note">no configuration places a well — relax min lateral or setbacks</div>
+              )}
+              {scan.slice(0, 6).map((c, i) => (
+                <div key={i} className="field" title={c.note} style={{ fontSize: 11 }}>
+                  <label style={{ fontSize: 11 }}>
+                    {c.azimuth_label} {c.azimuth_deg.toFixed(0)}° · {c.well_type === "uturn" ? "U-turn" : "single"} @ {c.spacing_ft.toFixed(0)}′
+                    <span style={{ color: "var(--muted)" }}>
+                      {" "}· {c.wells}w · {Math.round(c.completed_ft / 1000)}k′ ({Math.round(c.ft_per_well).toLocaleString()}′/w)
+                    </span>
+                  </label>
+                  <button className="ghost" style={{ padding: "0 8px" }}
+                    onClick={() => adoptConfig(c)}
+                    title="adopt: sets azimuth override, well type, and spacing (incl. generate benches)">
+                    use
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {zones.length === 0 && (
             <div className="note">set a bench to “generate” to design wells</div>
           )}

@@ -9,9 +9,11 @@ import {
   type BenchInfo,
   type GunbarrelData,
   type InventoryResponse,
+  type DirectionFeasibility,
   type OverrideSummary,
   type Params,
   type ParcelInfo,
+  type ScanConfig,
   type ScenarioSummary,
 } from "./api/client";
 
@@ -235,6 +237,10 @@ interface State {
 
   // inventory (per-deal, fetched explicitly via "Load inventory")
   inventory: InventoryResponse | null;
+  // parcel feasibility card (fetched alongside the inventory) + config scan
+  feasibility: DirectionFeasibility[] | null;
+  scan: ScanConfig[] | null;
+  scanning: boolean;
   benches: BenchInfo[];            // overlap inventory (unit truth: Novi counts)
   devBenches: BenchInfo[];         // area-developable benches (generation control)
   benchSource: Record<string, BenchSource>;
@@ -280,6 +286,9 @@ interface State {
   // them from the discovered benches (used when restoring a saved scenario —
   // the recipe must survive the inventory arriving)
   fetchInventory: (opts?: { seed?: boolean }) => Promise<void>;
+  // config scan (azimuth x type x spacing through the placement engine) + adopt
+  runScan: () => Promise<void>;
+  adoptConfig: (c: ScanConfig) => void;
   setBenchSource: (formation: string, src: BenchSource) => void;
   toggleCat: (c: Category) => void;
   toggleCull: (wellName: string) => void;
@@ -309,6 +318,7 @@ const PARCEL_RESET = {
   result: null, inventory: null, benches: [] as BenchInfo[], devBenches: [] as BenchInfo[],
   benchSource: {} as Record<string, BenchSource>, benchSpacing: {} as Record<string, number>,
   benchTvd: {} as Record<string, number>, culledWells: [] as string[],
+  feasibility: null, scan: null, scanning: false,
   lastGenKey: null, loaded: null, error: null,
 };
 
@@ -317,6 +327,9 @@ export const useStore = create<State>((set, get) => ({
   parcel: null,
 
   inventory: null,
+  feasibility: null,
+  scan: null,
+  scanning: false,
   benches: [],
   devBenches: [],
   benchSource: {},
@@ -401,8 +414,45 @@ export const useStore = create<State>((set, get) => ({
         } : {}),
         loading: false,
       });
+      // feasibility card rides along (best-effort — a failure never blocks the
+      // inventory; the scan re-fetches with current params anyway)
+      try {
+        const f = await api.feasibility(s.parcel.geojson, get().params);
+        set({ feasibility: f.directions });
+      } catch { /* card just doesn't render */ }
     } catch (e) { set({ error: String(e), loading: false }); }
   },
+
+  runScan: async () => {
+    const s = get();
+    if (!s.parcel) return;
+    set({ scanning: true, error: null });
+    try {
+      // fresh feasibility so the scan honors the CURRENT setbacks/min-lateral
+      const f = await api.feasibility(s.parcel.geojson, s.params);
+      const r = await api.scan(s.parcel.geojson, s.params, f.directions);
+      set({ feasibility: f.directions, scan: r.configs, scanning: false });
+    } catch (e) { set({ error: String(e), scanning: false }); }
+  },
+
+  // Adopt a scan row: deal-level azimuth/type/spacing become the generator
+  // params (azimuth as an EXPLICIT override — reproducible, not re-sourced),
+  // and benches already set to generate follow the adopted spacing (per-bench
+  // spacing otherwise overrides the deal default and the adoption would no-op).
+  adoptConfig: (c) =>
+    set((s) => {
+      const benchSpacing = { ...s.benchSpacing };
+      for (const [f, src] of Object.entries(s.benchSource)) {
+        if (src === "generate") benchSpacing[f] = c.spacing_ft;
+      }
+      return {
+        params: {
+          ...s.params, azimuth_deg: c.azimuth_deg, spacing_ft: c.spacing_ft,
+          well_type: c.well_type as Params["well_type"],
+        },
+        benchSpacing,
+      };
+    }),
 
   setBenchSource: (formation, src) =>
     set((s) => ({ benchSource: { ...s.benchSource, [formation]: src } })),

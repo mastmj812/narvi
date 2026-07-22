@@ -4,6 +4,12 @@ The geometry core (generate / parcel / placement / records) is DB-free. The
 warehouse data layer (`narvi.warehouse`) is imported separately so that the core
 stays importable without psycopg / a live connection."""
 
+from .feasibility import (
+    DirectionFeasibility,
+    ScanConfig,
+    parcel_feasibility,
+    scan_configs,
+)
 from .generate import generate_scenario, generate_wine_rack
 from .parcel import (
     load_named_parcels,
@@ -25,6 +31,10 @@ from .shp_export import inventory_shapefile_zip
 from .viz import gunbarrel_data, scenario_geojson
 
 __all__ = [
+    "DirectionFeasibility",
+    "ScanConfig",
+    "parcel_feasibility",
+    "scan_configs",
     "generate_scenario",
     "generate_wine_rack",
     "load_named_parcels",

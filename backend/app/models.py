@@ -111,6 +111,58 @@ class InventoryResponse(BaseModel):
     dev_benches: list[BenchInfoModel]           # area-developable benches (override menu)
 
 
+class FeasibilityRequest(BaseModel):
+    """Parcel feasibility card — what each realistic bearing can hold. The grid
+    azimuth is sourced (confidence-gated) unless the client stipulates one."""
+
+    parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
+    setback_ft: float = 330.0
+    setback_ns_ft: float | None = None
+    setback_ew_ft: float | None = None
+    min_lateral_ft: float | None = 4000.0
+    grid_azimuth_deg: float | None = None      # None -> source from the warehouse
+    buffer_ft: float = 5280.0
+
+
+class DirectionFeasibilityModel(BaseModel):
+    label: str                                 # 'grid' | 'long-axis'
+    azimuth_deg: float
+    max_lateral_ft: float
+    cross_extent_ft: float
+    note: str
+
+
+class FeasibilityResponse(BaseModel):
+    directions: list[DirectionFeasibilityModel]
+
+
+class ScanRequest(BaseModel):
+    """Configuration scan: sweep azimuth x well-type x spacing through the real
+    placement engine, ranked by completed footage. Pure geometry — the client
+    passes the feasibility directions (which carry the sourced grid azimuth)."""
+
+    parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
+    params: ScenarioParamsModel                # base (setbacks, min lateral, floor)
+    azimuths: list[DirectionFeasibilityModel]  # from /parcels/feasibility
+    spacings: list[float] | None = None        # None -> engine defaults
+
+
+class ScanConfigModel(BaseModel):
+    azimuth_label: str
+    azimuth_deg: float
+    well_type: str
+    spacing_ft: float
+    wells: int
+    legs: int
+    completed_ft: float
+    ft_per_well: float
+    note: str
+
+
+class ScanResponse(BaseModel):
+    configs: list[ScanConfigModel]
+
+
 class SaveScenarioRequest(BaseModel):
     deal_id: str
     scenario_id: str

@@ -136,6 +136,28 @@ export interface SaveComposedBody {
   source_azimuth: boolean;
 }
 
+// what one lateral bearing can hold in the parcel (feasibility card + scan input)
+export interface DirectionFeasibility {
+  label: string;               // 'grid' | 'long-axis'
+  azimuth_deg: number;
+  max_lateral_ft: number;
+  cross_extent_ft: number;
+  note: string;
+}
+
+// one swept configuration from /generate/scan, ranked by completed footage
+export interface ScanConfig {
+  azimuth_label: string;
+  azimuth_deg: number;
+  well_type: string;           // 'single' | 'uturn'
+  spacing_ft: number;
+  wells: number;
+  legs: number;
+  completed_ft: number;
+  ft_per_well: number;
+  note: string;
+}
+
 export interface ScenarioSummary {
   deal_id: string;
   scenario_id: string;
@@ -174,6 +196,17 @@ export const api = {
   inventory: (parcel: GeoJSON.Geometry, buffer_ft = 5280, categories: Category[] = ["pdp", "pud", "res"],
     context_radius_ft: number | null = null) =>
     jpost<InventoryResponse>("/api/parcels/inventory", { parcel, buffer_ft, categories, context_radius_ft }),
+
+  // what each realistic bearing can hold (grid azimuth sourced server-side)
+  feasibility: (parcel: GeoJSON.Geometry, p: Params) =>
+    jpost<{ directions: DirectionFeasibility[] }>("/api/parcels/feasibility", {
+      parcel, setback_ft: p.setback_ft, setback_ns_ft: p.setback_ns_ft,
+      setback_ew_ft: p.setback_ew_ft, min_lateral_ft: p.min_lateral_ft,
+    }),
+
+  // azimuth x well-type x spacing sweep through the placement engine (pure geometry)
+  scan: (parcel: GeoJSON.Geometry, params: Params, azimuths: DirectionFeasibility[]) =>
+    jpost<{ configs: ScanConfig[] }>("/api/generate/scan", { parcel, params, azimuths }),
 
   uploadParcels: async (file: File): Promise<{ parcels: ParcelInfo[] }> => {
     const fd = new FormData();

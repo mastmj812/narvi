@@ -109,3 +109,52 @@ def test_generate_winerack_requires_zones():
     }
     r = client.post("/api/generate", json=body)
     assert r.status_code == 400  # no zones and no source_tvd
+
+
+def _half_section_geojson():
+    from shapely.affinity import scale
+
+    sq = synthetic_section(5280.0)
+    return mapping(_to_wgs_geom(scale(sq, xfact=1.0, yfact=0.5, origin=sq.centroid)))
+
+
+def test_feasibility_with_stipulated_grid_is_db_free():
+    r = client.post("/api/parcels/feasibility", json={
+        "parcel": _half_section_geojson(),
+        "setback_ft": 330, "min_lateral_ft": 4000,
+        "grid_azimuth_deg": 0.0,           # stipulated -> no warehouse touch
+    })
+    assert r.status_code == 200
+    dirs = r.json()["directions"]
+    assert [d["label"] for d in dirs] == ["grid", "long-axis"]
+    grid = dirs[0]
+    assert grid["max_lateral_ft"] < 4000 and "min lateral" in grid["note"]
+    assert dirs[1]["max_lateral_ft"] > 4000
+
+
+def test_scan_ranks_configs_and_reproduces():
+    parcel = _half_section_geojson()
+    feas = client.post("/api/parcels/feasibility", json={
+        "parcel": parcel, "setback_ft": 330, "grid_azimuth_deg": 0.0,
+    }).json()
+    r = client.post("/api/generate/scan", json={
+        "parcel": parcel,
+        "params": {"spacing_ft": 880, "setback_ft": 330, "formation": "WCA_2",
+                   "target_tvd_ft": 11663},
+        "azimuths": feas["directions"],
+    })
+    assert r.status_code == 200
+    configs = r.json()["configs"]
+    assert configs and configs[0]["azimuth_label"] == "long-axis"
+    fts = [c["completed_ft"] for c in configs]
+    assert fts == sorted(fts, reverse=True)
+    # adopting the winner through /generate reproduces its footage
+    w = configs[0]
+    g = client.post("/api/generate", json={
+        "parcel": parcel,
+        "params": {"spacing_ft": w["spacing_ft"], "setback_ft": 330,
+                   "formation": "WCA_2", "target_tvd_ft": 11663,
+                   "azimuth_deg": w["azimuth_deg"], "well_type": w["well_type"]},
+        "mode": "single",
+    }).json()
+    assert g["placed_wells"] == w["wells"]
