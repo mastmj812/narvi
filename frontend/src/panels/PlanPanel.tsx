@@ -300,10 +300,29 @@ export function PlanPanel() {
               <input type="checkbox" checked disabled />
             </div>
           ) : (
-            <div className="field">
-              <label title="adopt the offset-well grid azimuth sourced from the warehouse">grid azimuth (auto)</label>
-              <input type="checkbox" checked={sourceAzimuth} onChange={(e) => setSourceAzimuth(e.target.checked)} />
-            </div>
+            <>
+              <div className="field">
+                <label title="adopt the offset-well grid azimuth sourced from the warehouse (ignored while an override is set below)"
+                  style={params.azimuth_deg != null ? { color: "var(--muted)" } : undefined}>
+                  grid azimuth (auto)
+                </label>
+                <input type="checkbox" checked={sourceAzimuth} disabled={params.azimuth_deg != null}
+                  onChange={(e) => setSourceAzimuth(e.target.checked)} />
+              </div>
+              <div className="field">
+                <label
+                  title="hard bearing for the laterals, 0-180 deg (0 = N-S, 90 = E-W) — e.g. run down the long axis of a half-section instead of the offset grid; empty = auto"
+                  style={{ color: params.azimuth_deg != null ? "var(--accent)" : undefined }}
+                >
+                  azimuth override (deg)
+                </label>
+                <input type="number" step={0.1} min={0} max={180} style={{ width: 80 }}
+                  value={params.azimuth_deg ?? ""}
+                  placeholder="auto"
+                  onChange={(e) => setParam("azimuth_deg",
+                    e.target.value === "" ? null : Number(e.target.value))} />
+              </div>
+            </>
           )}
           <button className="primary" disabled={loading || zones.length === 0} onClick={() => generate()}>
             {loading ? "working…" : stale && result ? "Re-generate" : "Generate"}

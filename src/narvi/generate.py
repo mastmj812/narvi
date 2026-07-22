@@ -274,6 +274,30 @@ def _deal_anchor(window, az, p, uturn, spacing_m, gb) -> str:
     return best_a
 
 
+def _deal_anchor_zones(window, az, base, zs, z_spacings, gb) -> str:
+    """Wine-rack deal anchor: evaluate each anchor on the ZONES AS THEY WILL PLACE
+    — each zone's own spacing, U-turn eligibility, and stagger phase — and keep the
+    anchor drilling the most total footage (center on a tie). Evaluating only the
+    lead spacing at phase 0 (what `_deal_anchor` does) misses that a staggered
+    phase can need the slack an edge anchor provides: on a tight cross-window the
+    centered phase-0 row plateaus at one leg while a lease-line anchor fits a full
+    staggered U-turn in EVERY zone (Castaway half-sections, 1,200 ft leg-to-leg in
+    a 1,980 ft window)."""
+    best_a, best_ft = "center", -1.0
+    for a in ("center", "west", "east"):
+        ft = 0.0
+        for i, (z, sp) in enumerate(zip(zs, z_spacings)):
+            off = (i % 2) * (sp / 2.0)                  # the placement loop's stagger
+            u = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+            p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
+                          spacing_ft=sp)
+            ws, _ = _place_for_anchor(window, az, p_i, off, a, u, sp / FT_PER_M, gb)
+            ft += sum(w.completed_lateral_ft for w in ws)
+        if ft > best_ft + 1.0:                          # center first -> wins ties
+            best_a, best_ft = a, ft
+    return best_a
+
+
 def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float,
                 anchor: str = "center") -> int:
     return len(laterals_rotated(window, az, p.spacing_ft, p.min_lateral_ft, offset, anchor)[0])
@@ -363,7 +387,11 @@ def generate_scenario(
         # 'center' tries both row phases (a row on the midline vs straddling it) and
         # keeps the one that packs more — anchoring a row exactly on the midline can
         # fit one fewer than the equally-centered half-shift (3 vs 4 at 1,200 ft).
-        offs = (row_offset_ft, row_offset_ft + half) if a == "center" else (row_offset_ft,)
+        # ONLY when this call owns the phase (optimize_phase): under a wine-rack the
+        # phase IS the stagger — re-choosing it per zone let every zone converge to
+        # the same max-footage phase and stack benches on one cross-section.
+        offs = ((row_offset_ft, row_offset_ft + half)
+                if a == "center" and optimize_phase else (row_offset_ft,))
         cand, cand_dropped = max(
             (_place_for_anchor(window, az, p, o, a, uturn, spacing_m, gb) for o in offs),
             key=lambda r: round(sum(w.completed_lateral_ft for w in r[0]), 1))
@@ -422,9 +450,10 @@ def generate_wine_rack(
     base_eval = replace(base, spacing_ft=lead_spacing)
     u = base.well_type == "uturn" and lead_spacing >= base.uturn_min_leg_to_leg_ft
     spacing_m = lead_spacing / FT_PER_M
-    # Fix the row anchor ONCE for the deal (zones share where development hangs).
+    # Fix the row anchor ONCE for the deal (zones share where development hangs),
+    # judged on the zones as they will actually place (spacing + stagger phase).
     if base.anchor == "auto":
-        base = replace(base, anchor=_deal_anchor(window0, az, base_eval, u, spacing_m, gb))
+        base = replace(base, anchor=_deal_anchor_zones(window0, az, base, zs, z_spacings, gb))
     # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
     # side); auto-pick the higher-footage side, evaluated at the chosen anchor.
     # 'north'/'south' -> each zone resolves the same end from drill_from + the az.

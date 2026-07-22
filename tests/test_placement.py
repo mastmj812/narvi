@@ -341,3 +341,34 @@ def test_objective_max_count_vs_max_lateral():
     avg_lat = sum(w.legs[0].length_ft for w in lat_w) / len(lat_w)
     avg_cnt = sum(w.legs[0].length_ft for w in cnt_w) / len(cnt_w)
     assert avg_lat > avg_cnt
+
+
+def test_wine_rack_uturn_zones_stagger_not_stack():
+    # Regression (Castaway half-sections): with an auto anchor resolving to center,
+    # each zone's dual-phase center try re-chose the max-footage phase PER ZONE, so
+    # every 1,200 ft U-turn zone converged to the same cross-section — stacked
+    # benches, zero horizontal offset, separated only by dTVD. Zones must place at
+    # their stagger phase; the deal anchor must be judged on the staggered zones.
+    parcel = _rect_parcel(5280, 2640)              # E-W half-section (N2/S2 shape)
+    base = _params(well_type="uturn", spacing_ft=1200, setback_ft=330,
+                   azimuth_deg=90.0, anchor="auto", min_lateral_ft=4000)
+    zones = [Zone("BS3_S", 11364, spacing_ft=1200.0),
+             Zone("WCA_2", 11663, spacing_ft=1200.0),
+             Zone("WCB_1", 12024, spacing_ft=1200.0)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+
+    # every zone fits one full U-turn in the 1,980 ft cross-window
+    by_zone = {}
+    for w in wells:
+        by_zone.setdefault(w.target_tvd_ft, []).append(w)
+    assert set(by_zone) == {11364.0, 11663.0, 12024.0}
+    assert all(len(ws) == 1 and ws[0].well_type == "uturn" for ws in by_zone.values())
+
+    # adjacent zones must NOT share a cross-section: offset by the 600 ft stagger
+    xs = {tvd: sorted(round(leg.gunbarrel_x_ft) for leg in ws[0].legs)
+          for tvd, ws in by_zone.items()}
+    assert xs[11364.0] != xs[11663.0]
+    d = abs(xs[11663.0][0] - xs[11364.0][0])
+    assert abs(d - 600) < 1
+    # true 3-D nearest-leg gap reported (not zero-horizontal stacking)
+    assert rep.min_interzone_offset_ft is not None and rep.min_interzone_offset_ft > 600
