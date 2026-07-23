@@ -15,8 +15,16 @@ export function ScenarioBar() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bundleName, setBundleName] = useState("");
   const [busy, setBusy] = useState(false);
+  // scenario-list filter: matches name, deal_id, or scenario_id. Display-only —
+  // bundle selections on hidden rows stay selected (the Bundle count is the truth).
+  const [query, setQuery] = useState("");
   const scenKey = (s: ScenarioSummary) => `${s.deal_id}/${s.scenario_id}`;
   const dsuLabel = (s: ScenarioSummary) => s.name?.trim() || s.deal_id;
+  const q = query.trim().toLowerCase();
+  const visible = q
+    ? scenarios.filter((s) =>
+        [s.name ?? "", s.deal_id, s.scenario_id].some((t) => t.toLowerCase().includes(q)))
+    : scenarios;
 
   const toggleSelect = (key: string) =>
     setSelected((prev) => {
@@ -176,9 +184,27 @@ export function ScenarioBar() {
         </div>
       )}
 
+      {scenarios.length > 0 && (
+        <div className="row" style={{ marginTop: 8, alignItems: "center" }}>
+          <input
+            type="search" placeholder="filter scenarios…" value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            style={{ flex: 1, padding: "4px 6px", border: "1px solid var(--line)", borderRadius: 5 }}
+          />
+          {q && (
+            <span className="note" style={{ marginTop: 0, whiteSpace: "nowrap" }}>
+              {visible.length}/{scenarios.length}
+            </span>
+          )}
+        </div>
+      )}
+
       <div style={{ marginTop: 8 }}>
         {scenarios.length === 0 && <div className="note">no saved scenarios</div>}
-        {scenarios.map((s) => {
+        {scenarios.length > 0 && visible.length === 0 && (
+          <div className="note">no scenarios match “{query.trim()}”</div>
+        )}
+        {visible.map((s) => {
           const key = `${s.deal_id}/${s.scenario_id}`;
           const isLoaded = loaded?.deal_id === s.deal_id && loaded?.scenario_id === s.scenario_id;
           return (
