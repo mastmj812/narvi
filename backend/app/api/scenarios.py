@@ -10,7 +10,10 @@ from dataclasses import replace
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException
 
-from narvi import gunbarrel_data, parcel_from_geojson, persist, scenario_geojson
+from narvi import (
+    gunbarrel_data, parcel_from_geojson, persist, qualify_planned_names,
+    scenario_geojson,
+)
 from narvi.records import InventoryWell, ScenarioParams
 from narvi.warehouse import apply_handoff_support, inventory_from_warehouse
 
@@ -79,6 +82,9 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     if culled:
         wells = [w for w in wells if w.well_name not in culled]
     _classify_for_handoff(conn, wells, req.category_overrides)
+    # after culls + overrides (both key on the short generated names): persisted
+    # names carry the scenario label so merged-scenario consumers stay unique
+    qualify_planned_names(wells, req.name or req.deal_id)
     n = persist.save_scenario(
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
         # `generate` = the exact request recipe (minus the parcel, which reloads
@@ -161,6 +167,9 @@ def save_composed(
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
     _classify_for_handoff(conn, wells, req.category_overrides)
+    # after culls + overrides (both key on the short generated names): persisted
+    # names carry the scenario label so merged-scenario consumers stay unique
+    qualify_planned_names(wells, req.name or req.deal_id)
     if p is None:  # pure-baseline compose: synthetic pass-through header (like curate)
         p = ScenarioParams(
             scenario_id=req.scenario_id, deal_id=req.deal_id, formation="",

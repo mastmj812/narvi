@@ -10,7 +10,7 @@ from .feasibility import (
     parcel_feasibility,
     scan_configs,
 )
-from .generate import generate_scenario, generate_wine_rack
+from .generate import generate_scenario, generate_wine_rack, qualify_planned_names
 from .parcel import (
     load_named_parcels,
     load_parcel_zip,
@@ -37,6 +37,7 @@ __all__ = [
     "scan_configs",
     "generate_scenario",
     "generate_wine_rack",
+    "qualify_planned_names",
     "load_named_parcels",
     "load_parcel_zip",
     "parcel_from_geojson",

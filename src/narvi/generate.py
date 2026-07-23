@@ -197,6 +197,27 @@ def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high,
     return wells
 
 
+def qualify_planned_names(wells: list[InventoryWell], label: str | None) -> None:
+    """Prefix generator-named wells with the scenario's user-facing label
+    (`WCB_2-01` -> `broTime 4-9 WCB_2-01`), in place.
+
+    Generated names are `{formation}-{NN}` and restart at 01 in every
+    scenario, so a downstream consumer that merges several DSU plans (the
+    Blue Ox drop keys planned wells by name across scenarios) sees false
+    duplicates. Curated pass-through wells keep their names: pud/res carry
+    Novi stick names and pdp the api10 — both already unique.
+
+    Applied at SAVE time only — the on-screen working set (and the culls/
+    category overrides keyed on it) stays on the short generated names,
+    which the composed-load path regenerates from the recipe."""
+    label = (label or "").strip()
+    if not label:
+        return
+    for w in wells:
+        if w.category == "generated" and not w.well_name.startswith(label):
+            w.well_name = f"{label} {w.well_name}"
+
+
 def _drill_to_high(drill_from: str, az: float) -> bool:
     """Map a 'north'/'south' surface side to turn_at_high, given the azimuth: the
     turn goes at the end OPPOSITE the heels/pad. Whether the high-x end points north

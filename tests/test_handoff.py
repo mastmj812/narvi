@@ -13,6 +13,7 @@ from dataclasses import asdict
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from narvi.generate import qualify_planned_names
 from narvi.persist import _well_from_detail
 from narvi.records import InventoryWell, Leg
 from narvi.warehouse import apply_handoff_support, derive_handoff_category
@@ -52,6 +53,31 @@ def test_apply_handoff_support_dbfree():
     ]
     apply_handoff_support(None, wells)
     assert [w.handoff_category for w in wells] == ["PDP", "PUD", "UPSIDE", None, "PUD"]
+
+
+def test_qualify_planned_names():
+    """Generated names get the scenario label; curated stick names and PDP
+    api10s stay untouched (already globally unique). Re-application must not
+    double-prefix, and a blank label is a no-op."""
+    wells = [
+        _well("WCA_1-01"),
+        _well("WCA_1-02"),
+        _well("4249533594", category="pdp"),
+        _well("BLUE OX 23-14 1H", category="pud"),
+        _well("RES STICK 2H", category="res"),
+    ]
+    qualify_planned_names(wells, "broTime 4-9")
+    assert [w.well_name for w in wells] == [
+        "broTime 4-9 WCA_1-01", "broTime 4-9 WCA_1-02",
+        "4249533594", "BLUE OX 23-14 1H", "RES STICK 2H"]
+
+    qualify_planned_names(wells, "broTime 4-9")           # idempotent
+    assert wells[0].well_name == "broTime 4-9 WCA_1-01"
+
+    untouched = [_well("WCA_1-01")]
+    qualify_planned_names(untouched, None)
+    qualify_planned_names(untouched, "   ")
+    assert untouched[0].well_name == "WCA_1-01"
 
 
 def test_handoff_fields_survive_detail_roundtrip():
