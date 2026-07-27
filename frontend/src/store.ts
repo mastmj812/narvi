@@ -226,6 +226,28 @@ export function composeGunbarrel(s: ComposeSlice): GunbarrelData | null {
   };
 }
 
+// Category overrides restricted to wells that exist in the CURRENT working
+// set. Turning a bench off (or a regenerate that drops a well) orphans its
+// overrides, and the server hard-400s on an override naming an unknown well
+// rather than silently dropping it (deliberate typo guard) — so a save after
+// removing a bench would fail forever with no UI handle on the stale keys
+// (alch_kyle: BS benches turned off after losing Bone Spring rights left
+// BS2_S overrides pointing at nothing). Overridable wells = the composed
+// gun-barrel's planned points (PDP is fixed and never overridable).
+export function pruneOverrides(
+  s: ComposeSlice & Pick<State, "categoryOverrides">,
+): Record<string, "PUD" | "UPSIDE"> {
+  const gb = composeGunbarrel(s);
+  const known = new Set(
+    (gb?.points ?? [])
+      .filter((p) => p.category !== "pdp" && !p.context)
+      .map((p) => p.well_name),
+  );
+  return Object.fromEntries(
+    Object.entries(s.categoryOverrides).filter(([n]) => known.has(n)),
+  ) as Record<string, "PUD" | "UPSIDE">;
+}
+
 // The FC for EXPORT: composed working set minus context wells (offset background
 // is for the eyes, never for the GeoJSON/CSV handoff).
 export function exportFC(s: State): GeoJSON.FeatureCollection | null {
@@ -528,6 +550,10 @@ export const useStore = create<State>((set, get) => ({
     // scenario_id derives from the NAME so differently-named saves are distinct
     // rows; re-saving under the same name overwrites that row (deliberate).
     const slug = dealIdFor(name || s.parcel.label);
+    // Overrides for wells no longer in the working set (bench turned off,
+    // regenerate dropped a well) would 400 the save — prune to the wells
+    // that actually exist, and keep the store in step.
+    const categoryOverrides = pruneOverrides(s);
     try {
       const finalName = name || s.parcel.label;
       await api.saveComposedScenario({
@@ -536,7 +562,7 @@ export const useStore = create<State>((set, get) => ({
         bench_sources: s.benchSource,
         categories: (["pdp", "pud", "res"] as Category[]).filter((c) => s.cats[c]),
         culled_wells: s.culledWells,
-        category_overrides: s.categoryOverrides,
+        category_overrides: categoryOverrides,
         params: s.params,
         zones: zonesForGenerate(s),
         source_azimuth: s.sourceAzimuth,
@@ -544,7 +570,10 @@ export const useStore = create<State>((set, get) => ({
       await get().refreshScenarios();
       // the saved scenario is now "the one we're working on" — the loaded marker
       // and the name box follow it (a legacy-loaded id is superseded by plan_*)
-      set({ loaded: { deal_id: deal, scenario_id: `plan_${slug}`, name: finalName } });
+      set({
+        loaded: { deal_id: deal, scenario_id: `plan_${slug}`, name: finalName },
+        categoryOverrides,
+      });
     } catch (e) { set({ error: String(e) }); }
   },
 
