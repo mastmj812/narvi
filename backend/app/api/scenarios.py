@@ -15,7 +15,9 @@ from narvi import (
     scenario_geojson,
 )
 from narvi.records import InventoryWell, ScenarioParams
-from narvi.warehouse import apply_handoff_support, inventory_from_warehouse
+from narvi.warehouse import (
+    apply_handoff_support, apply_novi_rep, inventory_from_warehouse,
+)
 
 from ..deps import get_conn
 from ..engine import run_generate
@@ -82,6 +84,7 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     if culled:
         wells = [w for w in wells if w.well_name not in culled]
     _classify_for_handoff(conn, wells, req.category_overrides)
+    apply_novi_rep(conn, wells)
     # after culls + overrides (both key on the short generated names): persisted
     # names carry the scenario label so merged-scenario consumers stay unique
     qualify_planned_names(wells, req.name or req.deal_id)
@@ -113,6 +116,7 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
     _classify_for_handoff(conn, wells, req.category_overrides)
+    apply_novi_rep(conn, wells)
     # synthetic header params: a curate baseline is pass-through singles, not a run
     p = ScenarioParams(
         scenario_id=req.scenario_id, deal_id=req.deal_id, formation="", target_tvd_ft=0.0,
@@ -167,6 +171,7 @@ def save_composed(
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
     _classify_for_handoff(conn, wells, req.category_overrides)
+    apply_novi_rep(conn, wells)
     # after culls + overrides (both key on the short generated names): persisted
     # names carry the scenario label so merged-scenario consumers stay unique
     qualify_planned_names(wells, req.name or req.deal_id)

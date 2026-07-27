@@ -123,6 +123,17 @@ class InventoryWell:
     # Persists via `detail`; the anduin Blue Ox exporter reads it and it wins
     # over the exporter's own fallback derivation.
     handoff_category: str | None = None
+    # Novi Intelligence stick id (curated.intel_locations.stick_id) for pud/res
+    # pass-through wells — stable across quarterly reloads (append-only
+    # stick_id_map). None for generated wells and PDP producers.
+    stick_id: int | None = None
+    # Representative novi_intel set for the TC-vs-Novi ML comparison
+    # (warehouse.apply_novi_rep, filled at scenario save; anduin reads it from
+    # `detail`). mode 'self' = the well IS a novi stick, compare against its own
+    # forecast; 'neighborhood' = generated well, compare against the median of
+    # same-bench PUD/RES sticks nearby (curated.intel_representative_sticks,
+    # sql/35). None = not applicable (PDP/context) or not yet scored.
+    novi_rep: dict | None = None
 
 
 @dataclass

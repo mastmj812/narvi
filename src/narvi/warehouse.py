@@ -636,7 +636,7 @@ _STICK_SQL = """
 
 def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az,
                       fallback_name, recon_status=None, pdp_count_3mi=None,
-                      inflation_ratio=None):
+                      inflation_ratio=None, stick_id=None):
     """Build a single-leg InventoryWell from a warehouse lateral (heel->toe in
     lon/lat). Returns (well, cross_m) where cross_m is the well's work-CRS centroid
     for the cross-section projection; gunbarrel_x is set by the caller. Names must
@@ -661,6 +661,7 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
         category=category, novi_wellname=novi, recon_status=recon_status,
         pdp_count_3mi=(int(pdp_count_3mi) if pdp_count_3mi is not None else None),
         inflation_ratio=(float(inflation_ratio) if inflation_ratio is not None else None),
+        stick_id=(int(stick_id) if stick_id is not None else None),
     )
     return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
 
@@ -734,7 +735,8 @@ def inventory_from_warehouse(
                                                    hlon, hlat, tlon, tlat, az,
                                                    fallback_name=f"{cat}-{sid}",
                                                    recon_status=status,
-                                                   pdp_count_3mi=pc3, inflation_ratio=infl))
+                                                   pdp_count_3mi=pc3, inflation_ratio=infl,
+                                                   stick_id=sid))
 
     context_m = (context_radius_ft / FT_PER_M) if context_radius_ft else None
     kept, context = _classify_membership(items, parcel, min_overlap_frac, context_m)
@@ -789,6 +791,21 @@ def derive_handoff_category(well: InventoryWell) -> str:
     return "UPSIDE"
 
 
+def _bench_code(formation: str) -> str:
+    """Warehouse formation_blueox code for a well's bench: strip the wine-rack
+    bimodal suffix (`WCA_1_b` -> `WCA_1`) so split benches still match."""
+    return formation[:-2] if formation.endswith("_b") else formation
+
+
+def _well_legs_ewkt(well: InventoryWell) -> str:
+    """Producing legs as a 4326 MULTILINESTRING EWKT (heel->toe per leg)."""
+    parts = []
+    for leg in well.legs:
+        (h_lon, h_lat), (t_lon, t_lat) = leg.heel_lonlat, leg.toe_lonlat
+        parts.append(f"({h_lon} {h_lat}, {t_lon} {t_lat})")
+    return "SRID=4326;MULTILINESTRING(" + ", ".join(parts) + ")"
+
+
 def pdp_support_count_3mi(
     conn: psycopg.Connection, well: InventoryWell
 ) -> int | None:
@@ -800,12 +817,8 @@ def pdp_support_count_3mi(
     so split benches still match warehouse formation_blueox codes."""
     if not well.target_tvd_ft or not well.legs:
         return None
-    formation = well.formation[:-2] if well.formation.endswith("_b") else well.formation
-    parts = []
-    for leg in well.legs:
-        (h_lon, h_lat), (t_lon, t_lat) = leg.heel_lonlat, leg.toe_lonlat
-        parts.append(f"({h_lon} {h_lat}, {t_lon} {t_lat})")
-    legs_ewkt = "SRID=4326;MULTILINESTRING(" + ", ".join(parts) + ")"
+    formation = _bench_code(well.formation)
+    legs_ewkt = _well_legs_ewkt(well)
     with conn.cursor() as cur:
         cur.execute(
             _PDP_SUPPORT_3MI_SQL,
@@ -829,6 +842,75 @@ def apply_handoff_support(
             w.pdp_count_3mi = pdp_support_count_3mi(conn, w)
         if w.handoff_category is None:
             w.handoff_category = derive_handoff_category(w)
+
+
+# ---------------------------------------------------------------------------
+# Representative novi_intel set (detail->novi_rep) — the TC-vs-Novi ML
+# comparison population, persisted at scenario save. Selection rule of record
+# lives in the warehouse: curated.intel_representative_sticks (sql/35).
+# ---------------------------------------------------------------------------
+
+NOVI_REP_RADIUS_M = 1609.0     # 1 mi, stick-to-stick geography
+NOVI_REP_LATERAL_TOL = 0.25    # intel ll_ft within +/-25% of the subject lateral
+NOVI_REP_LOW_N = 3             # below this the neighborhood is flagged, never widened
+
+_REP_STICKS_SQL = """
+    SELECT stick_id
+    FROM curated.intel_representative_sticks(
+        ST_GeomFromEWKT(%(legs)s), %(bench)s, %(lateral)s, %(radius)s, %(tol)s)
+"""
+
+
+def apply_novi_rep(conn: psycopg.Connection | None, wells: list[InventoryWell]) -> None:
+    """Attach the representative novi_intel set to each well in place.
+
+    Rule (agreed 2026-07-27): GENERATED wells take the neighborhood set from
+    curated.intel_representative_sticks (same bench, PUD/RES sticks within
+    NOVI_REP_RADIUS_M, lateral within +/-NOVI_REP_LATERAL_TOL); n < NOVI_REP_LOW_N
+    flags low_n. CURATED pud/res pass-throughs ARE novi sticks — their set is
+    exactly themselves (mode 'self'). PDP producers and context wells carry no
+    set (no intel ML forecast exists for producers). narvi persists the SET
+    only — forecast fetching/median math is anduin's (narvi does not forecast).
+
+    With conn None, only the DB-free part runs: 'self' entries are still
+    written (stick_id is already on the well); generated wells stay unscored.
+    Existing novi_rep entries are refreshed (a re-save re-selects)."""
+    vintage: str | None = None
+    if conn is not None:
+        with conn.cursor() as cur:
+            cur.execute("SELECT curated.intel_vintage_date()")
+            row = cur.fetchone()
+        vintage = str(row[0]) if row and row[0] is not None else None
+    for w in wells:
+        if w.context or w.category == "pdp":
+            w.novi_rep = None
+            continue
+        if w.category in ("pud", "res"):
+            if w.stick_id is None:   # legacy record without the id — can't self-reference
+                w.novi_rep = None
+                continue
+            w.novi_rep = {
+                "mode": "self", "stick_ids": [w.stick_id], "n": 1,
+                "bench": _bench_code(w.formation), "intel_vintage": vintage,
+                "low_n": False,
+            }
+            continue
+        # generated
+        if conn is None or not w.legs:
+            continue
+        with conn.cursor() as cur:
+            cur.execute(_REP_STICKS_SQL, {
+                "legs": _well_legs_ewkt(w), "bench": _bench_code(w.formation),
+                "lateral": w.completed_lateral_ft,
+                "radius": NOVI_REP_RADIUS_M, "tol": NOVI_REP_LATERAL_TOL,
+            })
+            stick_ids = [int(r[0]) for r in cur.fetchall()]
+        w.novi_rep = {
+            "mode": "neighborhood", "stick_ids": stick_ids, "n": len(stick_ids),
+            "radius_m": NOVI_REP_RADIUS_M, "lateral_tol": NOVI_REP_LATERAL_TOL,
+            "bench": _bench_code(w.formation), "intel_vintage": vintage,
+            "low_n": len(stick_ids) < NOVI_REP_LOW_N,
+        }
 
 
 def bench_summary(wells: list[InventoryWell]) -> list[BenchInfo]:
