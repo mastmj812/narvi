@@ -226,6 +226,10 @@ def _well_from_detail(detail: dict) -> InventoryWell:
         pdp_count_3mi=detail.get("pdp_count_3mi"),
         inflation_ratio=detail.get("inflation_ratio"),
         handoff_category=detail.get("handoff_category"),
+        # novi identity + representative comparison set (anduin reads both
+        # from `detail`; see warehouse.apply_novi_rep)
+        stick_id=detail.get("stick_id"),
+        novi_rep=detail.get("novi_rep"),
     )
 
 
