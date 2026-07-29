@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { exportFC, useStore } from "../store";
+import { dealIdFor, exportFC, useStore } from "../store";
 import {
   exportGeoJSON, exportWellCSV, exportShapefile,
   exportBundleCSV, exportBundleGeoJSON, exportBundleShapefile, type BundleItem,
@@ -50,6 +50,34 @@ export function ScenarioBar() {
   // Novi baseline and regenerates server-side); export only needs the current
   // FC, so it also works on a loaded scenario.
   const canSave = !!parcel && !!inventory;
+
+  // Scenarios key on (deal_id, scenario_id): the deal comes from the parcel
+  // selected at save time, the scenario slug from the typed name — so the
+  // same name saved under a different parcel creates a NEW row instead of
+  // overwriting (the castaway_23 duplicate / bro_time phantom-pin trap).
+  // Warn before that happens; slug derivation mirrors store.save exactly.
+  const doSave = () => {
+    if (!parcel) return;
+    const curDeal = dealIdFor(parcel.label);
+    const sid = `plan_${dealIdFor(name || parcel.label)}`;
+    const clashes = scenarios.filter(
+      (s) => s.scenario_id === sid && s.deal_id !== curDeal,
+    );
+    if (clashes.length > 0) {
+      const label = name || parcel.label;
+      const others = clashes.map((s) => s.deal_id).join(", ");
+      const ok = window.confirm(
+        `"${label}" already exists under deal ${others}.\n\n` +
+        `The selected parcel is deal ${curDeal}, so saving creates a NEW ` +
+        `scenario there — it will NOT overwrite the existing one, and two ` +
+        `scenarios will share the same name.\n\n` +
+        `To overwrite the existing scenario, load it (or select its parcel) ` +
+        `first. Save here anyway?`,
+      );
+      if (!ok) return;
+    }
+    void save(name);
+  };
   const canExport = !!inventory || !!result;
 
   // export the current (post-cull, post-filter, context-stripped) inventory FC as
@@ -118,7 +146,7 @@ export function ScenarioBar() {
           onChange={(e) => setName(e.target.value)}
           style={{ flex: 2, padding: "4px 6px", border: "1px solid var(--line)", borderRadius: 5 }}
         />
-        <button className="ghost" disabled={!canSave} onClick={() => save(name)}>Save</button>
+        <button className="ghost" disabled={!canSave} onClick={doSave}>Save</button>
       </div>
 
       <div className="row" style={{ marginTop: 6, alignItems: "center" }}>
@@ -224,8 +252,12 @@ export function ScenarioBar() {
                   {s.name ?? s.deal_id}
                   {isLoaded && <span style={{ color: "var(--accent, #2563eb)", fontSize: 10 }}> · loaded</span>}
                 </div>
+                {/* deal_id shown so same-named scenarios under different
+                    deals are distinguishable at a glance (the castaway_23
+                    duplicate trap: scenarios key on deal/scenario, and the
+                    deal comes from the parcel selected at save time) */}
                 <div className="meta">
-                  {s.scenario_id} · {s.total_wells ?? 0}w
+                  {s.deal_id} / {s.scenario_id} · {s.total_wells ?? 0}w
                   {s.total_completed_ft != null && <> · {(s.total_completed_ft / 1000).toFixed(0)}k ft</>}
                 </div>
               </div>
