@@ -597,7 +597,13 @@ export const useStore = create<State>((set, get) => ({
         set({
           parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
           loaded: { deal_id, scenario_id, name: meta?.name ?? null },
-          params: { ...get().params, ...paramsFromScenario(cs.generate?.params) },
+          // DEFAULT_PARAMS base, NOT the current store: a load must replace
+          // generator state, never layer the recipe over the previously
+          // loaded scenario's residue. paramsFromScenario drops nulls, so a
+          // saved azimuth_deg=null (= auto) could never clear a leftover
+          // explicit azimuth — the runaway_10k-after-runaway_uturn bug
+          // (wells regenerated 90° off axis).
+          params: { ...DEFAULT_PARAMS, ...paramsFromScenario(cs.generate?.params) },
           sourceAzimuth: cs.generate?.source_azimuth ?? true,
           benchSource: (cs.bench_sources ?? {}) as Record<string, BenchSource>,
           cats: {
@@ -627,6 +633,11 @@ export const useStore = create<State>((set, get) => ({
         set({
           parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
           loaded: { deal_id, scenario_id, name: meta?.name ?? null },
+          // curate saves carry no generator recipe — reset to defaults so a
+          // later manual generate doesn't inherit the previous scenario's
+          // params (same leak class as the composed path).
+          params: { ...DEFAULT_PARAMS },
+          sourceAzimuth: true,
         });
         await get().fetchInventory({ seed: false });
         const kept = new Set(summary.kept_benches ?? []);
@@ -655,9 +666,11 @@ export const useStore = create<State>((set, get) => ({
       const sameParcel = restored != null && cur != null && dealIdFor(cur.label) === deal_id;
       const parcels = restored && !sameParcel && !get().parcels.some((p) => p.label === restored.label)
         ? [...get().parcels, restored] : get().parcels;
+      // DEFAULT_PARAMS base for the same reason as the composed path: the
+      // restore must not inherit the previously loaded scenario's params.
       const params: Params = gen
-        ? { ...get().params, ...gen.params }
-        : { ...get().params, ...paramsFromScenario(r.header?.params) };
+        ? { ...DEFAULT_PARAMS, ...gen.params }
+        : { ...DEFAULT_PARAMS, ...paramsFromScenario(r.header?.params) };
       const zones = gen?.zones ?? [];
       const src: Record<string, BenchSource> = {};
       for (const z of zones) src[z.formation] = "generate";
@@ -670,7 +683,8 @@ export const useStore = create<State>((set, get) => ({
         parcel: sameParcel ? cur : restored ?? cur,
         ...(sameParcel ? {} : { inventory: null, benches: [], devBenches: [] }),
         params,
-        sourceAzimuth: gen?.source_azimuth ?? get().sourceAzimuth,
+        // default true, never the previous scenario's setting
+        sourceAzimuth: gen?.source_azimuth ?? true,
         benchSource: src,
         benchTvd: zones.length
           ? Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft]))
