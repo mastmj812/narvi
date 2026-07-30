@@ -851,13 +851,32 @@ def apply_handoff_support(
 # ---------------------------------------------------------------------------
 
 NOVI_REP_RADIUS_M = 1609.0     # 1 mi, stick-to-stick geography
-NOVI_REP_LATERAL_TOL = 0.25    # intel ll_ft within +/-25% of the subject lateral
+NOVI_REP_LATERAL_TOL = 0.25    # default ll tolerance (delaware / unresolved basin)
+# Per-basin ll tolerance (amendment 2026-07-30): Midland per-foot productivity
+# is near length-invariant with lateral length, so shorter analogs stay
+# representative there; Delaware per-foot degrades with length — keep tight.
+# Keys = curated.intel_locations.basin (lowercase). MUST mirror anduin's
+# REP_LATERAL_TOL_BY_BASIN (backend/app/warehouse_client/intel_forecast.py)
+# and the ledger entry in engineering_db
+# docs/blue_ox_contract_amendments_pending.md.
+NOVI_REP_LATERAL_TOL_BY_BASIN = {"delaware": 0.25, "midland": 0.40}
 NOVI_REP_LOW_N = 3             # below this the neighborhood is flagged, never widened
+NOVI_REP_BASIN_LOOKUP_M = 8047.0  # 5 mi — basin is coarse, stay robust in sparse areas
 
 _REP_STICKS_SQL = """
     SELECT stick_id
     FROM curated.intel_representative_sticks(
         ST_GeomFromEWKT(%(legs)s), %(bench)s, %(lateral)s, %(radius)s, %(tol)s)
+"""
+
+# Modal basin of the intel sticks around the scenario — a parcel-level
+# property, resolved once per save from one well's legs.
+_REP_BASIN_SQL = """
+    SELECT basin
+    FROM curated.intel_locations
+    WHERE ST_DWithin(wellstick_geom::geography,
+                     ST_GeomFromEWKT(%(legs)s)::geography, %(radius)s)
+    GROUP BY basin ORDER BY COUNT(*) DESC LIMIT 1
 """
 
 
@@ -866,7 +885,8 @@ def apply_novi_rep(conn: psycopg.Connection | None, wells: list[InventoryWell]) 
 
     Rule (agreed 2026-07-27): GENERATED wells take the neighborhood set from
     curated.intel_representative_sticks (same bench, PUD/RES sticks within
-    NOVI_REP_RADIUS_M, lateral within +/-NOVI_REP_LATERAL_TOL); n < NOVI_REP_LOW_N
+    NOVI_REP_RADIUS_M, lateral within the BASIN'S ll tolerance —
+    NOVI_REP_LATERAL_TOL_BY_BASIN, amendment 2026-07-30); n < NOVI_REP_LOW_N
     flags low_n. CURATED pud/res pass-throughs ARE novi sticks — their set is
     exactly themselves (mode 'self'). PDP producers and context wells carry no
     set (no intel ML forecast exists for producers). narvi persists the SET
@@ -876,11 +896,25 @@ def apply_novi_rep(conn: psycopg.Connection | None, wells: list[InventoryWell]) 
     written (stick_id is already on the well); generated wells stay unscored.
     Existing novi_rep entries are refreshed (a re-save re-selects)."""
     vintage: str | None = None
+    basin: str | None = None
+    tol = NOVI_REP_LATERAL_TOL
     if conn is not None:
         with conn.cursor() as cur:
             cur.execute("SELECT curated.intel_vintage_date()")
             row = cur.fetchone()
         vintage = str(row[0]) if row and row[0] is not None else None
+        # Basin is a parcel-level property — resolve once from any well's legs.
+        probe = next((w for w in wells if not w.context and w.legs), None)
+        if probe is not None:
+            with conn.cursor() as cur:
+                cur.execute(_REP_BASIN_SQL, {
+                    "legs": _well_legs_ewkt(probe),
+                    "radius": NOVI_REP_BASIN_LOOKUP_M,
+                })
+                row = cur.fetchone()
+            if row and row[0]:
+                basin = str(row[0])
+                tol = NOVI_REP_LATERAL_TOL_BY_BASIN.get(basin, NOVI_REP_LATERAL_TOL)
     for w in wells:
         if w.context or w.category == "pdp":
             w.novi_rep = None
@@ -902,12 +936,12 @@ def apply_novi_rep(conn: psycopg.Connection | None, wells: list[InventoryWell]) 
             cur.execute(_REP_STICKS_SQL, {
                 "legs": _well_legs_ewkt(w), "bench": _bench_code(w.formation),
                 "lateral": w.completed_lateral_ft,
-                "radius": NOVI_REP_RADIUS_M, "tol": NOVI_REP_LATERAL_TOL,
+                "radius": NOVI_REP_RADIUS_M, "tol": tol,
             })
             stick_ids = [int(r[0]) for r in cur.fetchall()]
         w.novi_rep = {
             "mode": "neighborhood", "stick_ids": stick_ids, "n": len(stick_ids),
-            "radius_m": NOVI_REP_RADIUS_M, "lateral_tol": NOVI_REP_LATERAL_TOL,
+            "radius_m": NOVI_REP_RADIUS_M, "lateral_tol": tol, "basin": basin,
             "bench": _bench_code(w.formation), "intel_vintage": vintage,
             "low_n": len(stick_ids) < NOVI_REP_LOW_N,
         }

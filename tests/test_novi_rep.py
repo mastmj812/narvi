@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from narvi.persist import _well_from_detail
 from narvi.records import InventoryWell, Leg
 from narvi.warehouse import (
-    NOVI_REP_LATERAL_TOL, NOVI_REP_RADIUS_M, apply_novi_rep,
+    NOVI_REP_LATERAL_TOL, NOVI_REP_LATERAL_TOL_BY_BASIN, NOVI_REP_RADIUS_M,
+    apply_novi_rep,
 )
 
 
@@ -35,11 +36,13 @@ def _well(name="w1", category="generated", context=False, stick_id=None,
 
 
 class _FakeCursor:
-    """Canned-response cursor: vintage query -> one date row; the rep-sticks
-    function call -> the configured stick_id rows."""
+    """Fragment-routed cursor: vintage query -> one date row; the basin
+    lookup -> the configured basin; the rep-sticks function call -> the
+    configured stick_id rows."""
 
-    def __init__(self, rep_rows):
+    def __init__(self, rep_rows, basin="delaware"):
         self._rep_rows = rep_rows
+        self._basin = basin
         self._last_sql = ""
         self.calls = []
 
@@ -48,8 +51,11 @@ class _FakeCursor:
         self.calls.append((sql, params))
 
     def fetchone(self):
-        assert "intel_vintage_date" in self._last_sql
-        return ("2025-09-30",)
+        if "intel_vintage_date" in self._last_sql:
+            return ("2025-09-30",)
+        if "GROUP BY basin" in self._last_sql:
+            return (self._basin,) if self._basin is not None else None
+        raise AssertionError(f"unrouted fetchone SQL: {self._last_sql}")
 
     def fetchall(self):
         assert "intel_representative_sticks" in self._last_sql
@@ -63,8 +69,8 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rep_rows):
-        self.cur = _FakeCursor(rep_rows)
+    def __init__(self, rep_rows, basin="delaware"):
+        self.cur = _FakeCursor(rep_rows, basin=basin)
 
     @contextmanager
     def cursor(self):
@@ -86,6 +92,7 @@ def test_mode_routing():
     assert gen.novi_rep == {
         "mode": "neighborhood", "stick_ids": [1, 2, 3, 4], "n": 4,
         "radius_m": NOVI_REP_RADIUS_M, "lateral_tol": NOVI_REP_LATERAL_TOL,
+        "basin": "delaware",
         "bench": "WCA_1", "intel_vintage": "2025-09-30", "low_n": False,
     }
     assert stick.novi_rep == {
@@ -109,6 +116,38 @@ def test_low_n_flagged_never_widened():
     # and the persisted params are the defaults the manifest will declare
     assert rep_calls[0][1]["radius"] == NOVI_REP_RADIUS_M
     assert rep_calls[0][1]["tol"] == NOVI_REP_LATERAL_TOL
+
+
+def test_midland_basin_widens_lateral_tol():
+    """Per-basin amendment (2026-07-30): midland neighborhoods use the wider
+    ll tolerance; the payload records the tolerance actually used."""
+    w = _well()
+    conn = _FakeConn(rep_rows=[(1,), (2,), (3,)], basin="midland")
+    apply_novi_rep(conn, [w])
+    rep_call = [c for c in conn.cur.calls if "intel_representative_sticks" in c[0]][0]
+    assert rep_call[1]["tol"] == NOVI_REP_LATERAL_TOL_BY_BASIN["midland"] == 0.40
+    assert w.novi_rep["lateral_tol"] == 0.40
+    assert w.novi_rep["basin"] == "midland"
+
+
+def test_unresolved_basin_defaults_tight_tol():
+    """No intel sticks within the basin-lookup radius -> default (tight) tol."""
+    w = _well()
+    conn = _FakeConn(rep_rows=[], basin=None)
+    apply_novi_rep(conn, [w])
+    rep_call = [c for c in conn.cur.calls if "intel_representative_sticks" in c[0]][0]
+    assert rep_call[1]["tol"] == NOVI_REP_LATERAL_TOL
+    assert w.novi_rep["basin"] is None
+    assert w.novi_rep["lateral_tol"] == NOVI_REP_LATERAL_TOL
+
+
+def test_basin_lookup_once_per_save():
+    """Basin is parcel-level: one lookup per apply_novi_rep call, not per well."""
+    wells = [_well("g1"), _well("g2"), _well("g3")]
+    conn = _FakeConn(rep_rows=[(1,), (2,), (3,)], basin="midland")
+    apply_novi_rep(conn, wells)
+    basin_calls = [c for c in conn.cur.calls if "GROUP BY basin" in c[0]]
+    assert len(basin_calls) == 1
 
 
 def test_bimodal_bench_suffix_stripped():
