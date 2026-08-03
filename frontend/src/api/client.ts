@@ -147,6 +147,17 @@ export interface SaveComposedBody {
   params: Params;
   zones: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
   source_azimuth: boolean;
+  // acknowledge dropping persisted PUD/UPSIDE overrides (409 override_drop
+  // guard) — only set on the confirmed retry, never on the first attempt
+  force?: boolean;
+}
+
+// structured 409 detail from the save endpoints: the persisted scenario carries
+// per-well overrides this save would silently revert to auto
+export interface OverrideDropDetail {
+  code: "override_drop";
+  message: string;
+  dropped_overrides: Record<string, "PUD" | "UPSIDE">;
 }
 
 // what one lateral bearing can hold in the parcel (feasibility card + scan input)
@@ -183,13 +194,27 @@ export interface ScenarioSummary {
   azimuth_deg: number | null;
 }
 
+// Error carrying the HTTP status and the raw FastAPI `detail` so callers can
+// branch on structured conflicts (409 override_drop) instead of string-matching.
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly detail: unknown) {
+    super(message);
+  }
+}
+
 async function jpost<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail ?? `${url} -> ${r.status}`);
+  if (!r.ok) {
+    const detail: unknown = (await r.json().catch(() => ({})) as { detail?: unknown }).detail;
+    const msg = typeof detail === "string"
+      ? detail
+      : (detail as { message?: string } | null)?.message ?? `${url} -> ${r.status}`;
+    throw new ApiError(msg, r.status, detail);
+  }
   return r.json();
 }
 

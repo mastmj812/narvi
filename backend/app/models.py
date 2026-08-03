@@ -199,6 +199,9 @@ class SaveComposedRequest(BaseModel):
     source_azimuth: bool = True
     buffer_ft: float = 5280.0
     category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
+    # acknowledge dropping persisted overrides (see the 409 override_drop guard
+    # in scenarios.py) — never set on a first attempt
+    force: bool = False
 
 
 class SaveCurateRequest(BaseModel):
@@ -215,6 +218,8 @@ class SaveCurateRequest(BaseModel):
     category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
     buffer_ft: float = 5280.0                  # match /parcels/inventory: same fetch,
                                                # same membership, same saved set
+    # acknowledge dropping persisted overrides (409 override_drop guard)
+    force: bool = False
 
 
 class ShapefileExportRequest(BaseModel):
