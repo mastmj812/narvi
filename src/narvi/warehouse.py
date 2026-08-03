@@ -127,7 +127,12 @@ def apply_session_settings(conn: psycopg.Connection) -> None:
 
 def get_connection() -> psycopg.Connection:
     """Open a psycopg (v3) connection with Supabase-friendly session settings."""
-    conn = psycopg.connect(**_db_kwargs())
+    # prepare_threshold=None: server-side prepared statements don't survive a
+    # pooled-backend switch on the transaction pooler (6543). Passed here, not
+    # in _db_kwargs(), because it's a psycopg connect kwarg, not a conninfo
+    # param (db_conninfo/make_conninfo would reject it); the ConnectionPool in
+    # backend/app/db.py sets the same via its kwargs.
+    conn = psycopg.connect(**_db_kwargs(), prepare_threshold=None)
     apply_session_settings(conn)
     return conn
 
