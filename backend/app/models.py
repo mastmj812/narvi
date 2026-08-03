@@ -179,6 +179,8 @@ class SaveScenarioRequest(BaseModel):
     # after the auto scoring. PDP is never an override target — existing
     # producers classify PDP automatically and can't be reclassified.
     category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
+    # acknowledge dropping persisted overrides (409 override_drop guard)
+    force: bool = False
 
 
 class SaveComposedRequest(BaseModel):

@@ -147,6 +147,9 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     culled = set(req.culled_wells)
     if culled:
         wells = [w for w in wells if w.well_name not in culled]
+    # no name-keyed replace on this legacy path — only the id row is overwritten
+    _guard_override_drop(conn, req.deal_id, req.scenario_id, None,
+                         req.category_overrides, wells, req.force)
     _classify_for_handoff(conn, wells, req.category_overrides)
     apply_novi_rep(conn, wells)
     # after culls + overrides (both key on the short generated names): persisted
