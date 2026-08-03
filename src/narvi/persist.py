@@ -88,14 +88,23 @@ def save_scenario(
     wells: list[InventoryWell],
     summary: dict | None = None,
     name: str | None = None,
+    frame_azimuth_deg: float | None = None,
 ) -> int:
     """Upsert a scenario header + replace its inventory wells. Returns the well
     count written. A re-save of the same (deal_id, scenario_id) overwrites the
     prior run (wells are deleted via ON DELETE CASCADE through the header refresh
-    of child rows). Caller controls the transaction; this commits on success."""
+    of child rows). Caller controls the transaction; this commits on success.
+
+    `frame_azimuth_deg` is the scenario's gunbarrel frame — the azimuth of the
+    PLANNED sticks, which every persisted gunbarrel_x_ft is projected on. It
+    becomes the header azimuth_deg (and the drop's dsu_meta.azimuth_deg), so
+    pass it whenever wells carry heterogeneous per-well bearings (adopted
+    baselines). Fallback is wells[0] — correct for pure-generate saves, where
+    every well shares the generation azimuth."""
     aoi = parcel_to_ewkt_4326(parcel)
     # the resolved azimuth actually used (params.azimuth_deg may be None when auto)
-    resolved_az = wells[0].lateral_azimuth_deg if wells else params.azimuth_deg
+    resolved_az = (frame_azimuth_deg if frame_azimuth_deg is not None
+                   else wells[0].lateral_azimuth_deg if wells else params.azimuth_deg)
     total_legs = sum(len(w.legs) for w in wells)
     header = {
         "deal_id": deal_id, "scenario_id": scenario_id, "name": name,

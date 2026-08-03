@@ -16,6 +16,7 @@ from narvi.warehouse import (
     _classify_membership,
     _passthrough_well,
     axial_mean_deg,
+    project_gunbarrel,
     resolve_baseline_azimuth,
     sticks_azimuth_deg,
 )
@@ -143,3 +144,26 @@ def test_resolve_baseline_azimuth_trust_order():
     # 3. ... an unconfident one is NOT — parcel long axis instead.
     assert resolve_baseline_azimuth([], _stats(41.2, False), parcel) == 90.0
     assert resolve_baseline_azimuth([], None, parcel) == 90.0
+
+
+def test_resolve_baseline_azimuth_planned_over_existing():
+    # The htward_77_66 shape (2026-08-03 user rule): the frame follows the
+    # PLANNED sticks (adopted pud/res), not the unit's legacy producers —
+    # a lone off-plan PDP must not steer the header/frame.
+    parcel = box(0.0, 0.0, 4000.0, 800.0)
+    planned = [_bearing_well("p1", 130.0), _bearing_well("p2", 130.4)]
+    existing = [_bearing_well("x1", 119.0, category="pdp")]
+    az = resolve_baseline_azimuth(planned + existing, None, parcel)
+    assert abs(az - 130.2) < 0.3
+    # pure-PDP adoption: the producers ARE the subject -> their bearing wins
+    az2 = resolve_baseline_azimuth(existing, _stats(41.2, True), parcel)
+    assert abs(az2 - 119.0) < 0.1
+
+
+def test_project_gunbarrel_frame():
+    # cross_axis(0) points EAST (+offset), cross_axis(90) points SOUTH.
+    w = _leg_well("w", "pdp", (100.0, 0.0), (100.0, 1000.0))[0]  # N-S leg at x=100 m
+    project_gunbarrel([w], 0.0, (0.0, 0.0))
+    assert abs(w.legs[0].gunbarrel_x_ft - 100.0 * FT_PER_M) < 0.1
+    project_gunbarrel([w], 90.0, (0.0, 0.0))                     # mid y=500 -> south is -
+    assert abs(w.legs[0].gunbarrel_x_ft - (-500.0 * FT_PER_M)) < 0.1

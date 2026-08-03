@@ -736,24 +736,47 @@ def resolve_baseline_azimuth(
     """The cross-section frame azimuth for an adopted (curate) baseline, in
     order of trust:
 
-    1. the kept in-unit sticks' own bearings — adopted inventory carries real
-       geometry, so its axial mean is self-consistent with the coordinates by
-       construction;
-    2. the neighborhood grid azimuth, ONLY when its coherence gate passes;
-    3. the parcel's long axis.
+    1. the kept PLANNED sticks' own bearings (adopted Novi pud/res — the
+       inventory the scenario is ABOUT; the frame follows the development
+       direction, not the legacy producers: a unit whose old PDPs run N-S
+       under a NE-grid Novi plan must frame on the plan);
+    2. the kept EXISTING sticks (pure-PDP adoption: the producers are then
+       the whole subject);
+    3. the neighborhood grid azimuth, ONLY when its coherence gate passes;
+    4. the parcel's long axis.
 
-    The toucan defect (diagnosed 2026-08-03): the old code took the 1-mi
-    neighborhood circular mean UNCONDITIONALLY. Around toucan that population
-    is bimodal (~57° modern grid + ~0°/175° N-S cluster, R 0.62-0.71 — below
-    the 0.85 trust floor), so wells that plainly run ~57° were stamped 24-41°,
-    and the gunbarrel offsets were projected on that phantom axis. Never use
-    an unconfident neighborhood mean."""
-    az = sticks_azimuth_deg(kept)
+    Own-stick bearings are self-consistent with the coordinates by
+    construction. The toucan defect (diagnosed 2026-08-03): the old code took
+    the 1-mi neighborhood circular mean UNCONDITIONALLY. Around toucan that
+    population is bimodal (~57° modern grid + ~0°/175° N-S cluster, R
+    0.62-0.71 — below the 0.85 trust floor), so wells that plainly run ~57°
+    were stamped 24-41°, and the gunbarrel offsets were projected on that
+    phantom axis. Never use an unconfident neighborhood mean."""
+    planned = [w for w in kept if w.category in ("pud", "res")]
+    az = sticks_azimuth_deg(planned)
+    if az is None:
+        az = sticks_azimuth_deg(kept)
     if az is None and neighborhood is not None and neighborhood.confident:
         az = neighborhood.azimuth_deg
     if az is None:
         az = dominant_azimuth(parcel)
     return round(az % 180.0, 1)
+
+
+def project_gunbarrel(
+    wells: list[InventoryWell], azimuth_deg: float, origin_xy: tuple[float, float]
+) -> None:
+    """(Re)project every leg's gunbarrel_x_ft onto the frame defined by
+    `azimuth_deg` through `origin_xy` (work-CRS parcel centroid). The frame of
+    record is the SCENARIO's — one axis for every population in the unit —
+    so composed saves re-project adopted pass-throughs onto the plan frame
+    rather than leaving them in the baseline frame they were fetched under."""
+    for w in wells:
+        for leg in w.legs:
+            mid = ((leg.heel_xy[0] + leg.toe_xy[0]) / 2.0,
+                   (leg.heel_xy[1] + leg.toe_xy[1]) / 2.0)
+            leg.gunbarrel_x_ft = round(
+                gunbarrel_offset_ft(mid, azimuth_deg, origin_xy), 1)
 
 
 def _classify_membership(
@@ -791,18 +814,21 @@ def inventory_from_warehouse(
     categories: tuple[str, ...] = ("pdp", "pud", "res"),
     min_overlap_frac: float = 0.30,
     context_radius_ft: float | None = None,
-) -> list[InventoryWell]:
+) -> tuple[list[InventoryWell], float]:
     """Adopt the EXISTING inventory IN a parcel as InventoryWells — the curate-mode
-    baseline. PDP producers (curated.wells_enriched, landing->bottom-hole leg) and
-    Novi PUD/RES sticks (curated.intel_locations + intel_formation_blueox) become
-    single-leg wells tagged by `category`. Unit membership is co-extent overlap
+    baseline. Returns (wells, frame_azimuth_deg). PDP producers
+    (curated.wells_enriched, landing->bottom-hole leg) and Novi PUD/RES sticks
+    (curated.intel_locations + intel_formation_blueox) become single-leg wells
+    tagged by `category`. Unit membership is co-extent overlap
     (see _classify_membership); with `context_radius_ft`, near-parcel PDP laterals
     that fail membership come back flagged `context=True` (visual background only).
     gunbarrel_x is the CANONICAL cross-section offset — placement.cross_axis(az)
     from the parcel centroid, the same frame generated wells use, so curate,
     override and context populations overlay in one gun-barrel. The frame
-    azimuth comes from the kept sticks THEMSELVES (resolve_baseline_azimuth);
-    the neighborhood grid stat is a fallback only, and only when confident."""
+    azimuth comes from the kept PLANNED sticks (resolve_baseline_azimuth) and
+    is returned so save paths can persist it as the scenario header azimuth;
+    each well's lateral_azimuth_deg is its OWN as-built bearing (per-well
+    as-drilled, 2026-08-03 — the header/frame is the plan-level number)."""
     aoi = parcel_to_ewkt_4326(parcel)
     fetch_ft = max(buffer_ft, context_radius_ft or 0.0)
     buf_m = fetch_ft / FT_PER_M
@@ -841,11 +867,16 @@ def inventory_from_warehouse(
         if not kept else None
     )
     az = resolve_baseline_azimuth([w for w, _ in kept], neighborhood, parcel)
-    origin = (parcel.centroid.x, parcel.centroid.y)
-    for well, cross in all_items:
-        well.lateral_azimuth_deg = az
-        well.legs[0].gunbarrel_x_ft = round(gunbarrel_offset_ft(cross, az, origin), 1)
-    return [w for w, _ in all_items]
+    wells = [w for w, _ in all_items]
+    # Per-well azimuth = the well's OWN as-built bearing (it carries real
+    # geometry — flattening every row to one unit number hid mixed
+    # orientations and read as "not as-drilled" to the drop consumer). The
+    # unit-level number is the returned frame az.
+    for well in wells:
+        own = sticks_azimuth_deg([well])
+        well.lateral_azimuth_deg = round(own, 1) if own is not None else az
+    project_gunbarrel(wells, az, (parcel.centroid.x, parcel.centroid.y))
+    return wells, az
 
 
 # ---------------------------------------------------------------------------

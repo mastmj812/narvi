@@ -17,6 +17,7 @@ from narvi import (
 from narvi.records import InventoryWell, ScenarioParams
 from narvi.warehouse import (
     apply_handoff_support, apply_novi_rep, inventory_from_warehouse,
+    project_gunbarrel,
 )
 
 from ..deps import get_conn
@@ -107,7 +108,7 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
     the wells whose bench is selected and whose category is active."""
     parcel = parcel_from_geojson(req.parcel)
     cats = tuple(c for c in ("pdp", "pud", "res") if c in req.categories)
-    wells = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
+    wells, frame_az = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
     kept = set(req.kept_benches)
     culled = set(req.culled_wells)
     wells = [w for w in wells if w.formation in kept and w.well_name not in culled]
@@ -126,7 +127,8 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
         conn, req.deal_id, req.scenario_id, parcel, p, wells,
         summary={"mode": "curate", "kept_benches": req.kept_benches,
                  "categories": list(cats), "culled_wells": req.culled_wells,
-                 "category_overrides": req.category_overrides}, name=req.name)
+                 "category_overrides": req.category_overrides}, name=req.name,
+        frame_azimuth_deg=frame_az)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 
@@ -142,14 +144,17 @@ def save_composed(
     gen_zones = [z for z in req.zones if req.bench_sources.get(z.formation) == "generate"]
 
     wells = []
+    passthrough: list[InventoryWell] = []
+    frame_az: float | None = None
     note, notes = "", []
     cats = tuple(c for c in ("pdp", "pud", "res") if c in req.categories)
     if novi_benches or "pdp" in cats:
-        inv = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
+        inv, frame_az = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
         # PDP are reality — they persist independent of bench source (the same
         # rule the client display uses); PUD/RES only from adopted benches
-        wells += [w for w in inv
-                  if w.category == "pdp" or w.formation in novi_benches]
+        passthrough = [w for w in inv
+                       if w.category == "pdp" or w.formation in novi_benches]
+        wells += passthrough
         note = f"{len(wells)} kept Novi/PDP wells in {len(novi_benches)} benches"
     p = None
     if gen_zones:
@@ -162,6 +167,17 @@ def save_composed(
             raise HTTPException(status_code=400, detail=str(exc))
         wells += gwells
         note = f"{note}; {gnote}" if note else gnote
+        if gwells:
+            # Generated development defines the scenario frame (header azimuth
+            # + gunbarrel axis). Re-project adopted pass-throughs onto it so
+            # ONE dsu_meta azimuth reproduces every persisted offset — without
+            # this, curated and generated gunbarrel_x sit in different frames
+            # whenever the unit's existing wells run off the plan direction
+            # (htward_77_66: lone PDP at ~119°, plan at ~130°).
+            frame_az = gwells[0].lateral_azimuth_deg
+            if passthrough:
+                project_gunbarrel(passthrough, frame_az,
+                                  (parcel.centroid.x, parcel.centroid.y))
 
     culled = set(req.culled_wells)
     if culled:
@@ -195,7 +211,7 @@ def save_composed(
             },
             "note": note, "warehouse_notes": notes,
         },
-        name=req.name)
+        name=req.name, frame_azimuth_deg=frame_az)
     # NAME is the user-facing identity within a deal: saving under an existing
     # name REPLACES whatever row held it, even across id schemes (a legacy
     # curate_*/single_* row being upgraded by a re-save would otherwise linger
