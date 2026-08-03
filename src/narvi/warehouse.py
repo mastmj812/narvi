@@ -37,7 +37,7 @@ from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
 
 from .parcel import WORK_EPSG
-from .placement import cross_axis, gunbarrel_offset_ft
+from .placement import cross_axis, dominant_azimuth, gunbarrel_offset_ft
 from .records import FT_PER_M, InventoryWell, Leg, Zone
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
@@ -314,6 +314,23 @@ def zones_from_warehouse(
     return zones, stats
 
 
+def axial_mean_deg(bearings: list[float]) -> tuple[float | None, float]:
+    """Axial circular mean of compass bearings (degrees): a lateral and its
+    reverse describe the same line, so the angles are DOUBLED before averaging
+    (10° and 190° reinforce) and the mean is folded back to [0, 180). Returns
+    (mean, R) where R is the mean resultant length in [0, 1] — the coherence of
+    the population (bimodal bearings -> low R and a mean that may lie between
+    the modes, a direction nothing actually drills). (None, 0.0) when empty."""
+    n = len(bearings)
+    if not n:
+        return None, 0.0
+    s = sum(math.sin(math.radians(2 * b)) for b in bearings) / n
+    c = sum(math.cos(math.radians(2 * b)) for b in bearings) / n
+    r = math.hypot(s, c)
+    az = (math.degrees(math.atan2(s, c)) / 2.0) % 180.0
+    return az, r
+
+
 @dataclass
 class AzimuthStats:
     """Section-grid azimuth from offset laterals in an AOI (+ buffer)."""
@@ -375,11 +392,8 @@ def lateral_azimuth_stats(
                             confident=False,
                             note=f"no horizontal laterals within {buffer_ft:.0f} ft of the AOI")
 
-    # axial circular mean: double the angles so 10 deg and 190 deg reinforce
-    s = sum(math.sin(math.radians(2 * b)) for b in bearings) / n
-    c = sum(math.cos(math.radians(2 * b)) for b in bearings) / n
-    R = math.hypot(s, c)                                   # mean resultant length
-    az = (math.degrees(math.atan2(s, c)) / 2.0) % 180.0    # fold back to [0,180)
+    az, R = axial_mean_deg(bearings)                       # folded to [0,180)
+    assert az is not None                                  # n > 0 checked above
     # circular std (Mardia) on the axial scale, reported in real (halved) degrees
     circ_std = math.degrees(math.sqrt(-2.0 * math.log(R))) / 2.0 if R > 1e-9 else None
     confident = n >= _AZIMUTH_MIN_WELLS and R >= _AZIMUTH_MIN_COHERENCE
@@ -497,13 +511,16 @@ def available_benches(
         # median gap between distinct rows. Robust to near-duplicate/stacked
         # sticks (same lateral as PUD+RES, report versions), which a raw nearest-
         # neighbor distance double-counts as ~0 ft. No grid azimuth (no offset
-        # laterals) -> skip: projecting on a fake az=0 axis fabricates spacing.
+        # laterals) OR an UNCONFIDENT one (mixed-grid neighborhood — the toucan
+        # defect) -> skip: projecting on a fake or distrusted axis fabricates
+        # spacing just the same.
         # IN-UNIT sticks only (the same >=30% co-extent membership the inventory
         # uses): Novi's predicted DSUs rarely line up with the deal's unit, so
         # end-to-end pads from adjacent Novi DSUs sit laterally shifted — their
         # rows interleave on the cross axis and fabricate tight gaps (broTime
         # 20-35 BS1_S read ~550 ft where the in-unit pattern is ~1,300).
-        az = lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0)).azimuth_deg
+        grid = lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
+        az = grid.azimuth_deg if grid.confident else None
         cross: dict[str, list[float]] = {}
         if az is not None:
             perp = cross_axis(az)                      # canonical cross axis (E, N)
@@ -634,14 +651,16 @@ _STICK_SQL = """
 """
 
 
-def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat, az,
+def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
                       fallback_name, recon_status=None, pdp_count_3mi=None,
                       inflation_ratio=None, stick_id=None):
     """Build a single-leg InventoryWell from a warehouse lateral (heel->toe in
     lon/lat). Returns (well, cross_m) where cross_m is the well's work-CRS centroid
-    for the cross-section projection; gunbarrel_x is set by the caller. Names must
-    be STABLE across re-fetches (culls key on well_name), so `fallback_name` is
-    derived from a warehouse key (stick_id), never from list position."""
+    for the cross-section projection; gunbarrel_x AND lateral_azimuth_deg are set
+    by the caller once the baseline frame is resolved (resolve_baseline_azimuth
+    needs the kept set first). Names must be STABLE across re-fetches (culls key
+    on well_name), so `fallback_name` is derived from a warehouse key (stick_id),
+    never from list position."""
     hx, hy = _to_work(h_lon, h_lat)
     tx, ty = _to_work(t_lon, t_lat)
     length_ft = math.hypot(tx - hx, ty - hy) * FT_PER_M
@@ -654,7 +673,7 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
     well = InventoryWell(
         scenario_id="", deal_id="", well_name=str(name or fallback_name),
         well_type="single", formation=fb,
-        target_tvd_ft=float(tvd) if tvd else 0.0, lateral_azimuth_deg=round(az, 1),
+        target_tvd_ft=float(tvd) if tvd else 0.0, lateral_azimuth_deg=0.0,
         legs=[leg], turn=None,
         completed_lateral_ft=round(length_ft, 1), drilled_lateral_ft=round(length_ft, 1),
         nearest_neighbor_spacing_ft=0.0, setback_ft=0.0,
@@ -664,6 +683,77 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
         stick_id=(int(stick_id) if stick_id is not None else None),
     )
     return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
+
+
+def _axial_dist_deg(a: float, b: float) -> float:
+    """Distance between two axial bearings on the [0, 180) circle (1° and
+    179° are 2° apart — a line has no direction)."""
+    d = abs((a - b) % 180.0)
+    return min(d, 180.0 - d)
+
+
+_STICKS_AZ_TRIM_DEG = 30.0   # off-axis cut for the dominant-mode iteration
+
+
+def sticks_azimuth_deg(wells: list[InventoryWell]) -> float | None:
+    """DOMINANT axial bearing ([0, 180) deg) of the wells' OWN legs, from
+    work-CRS heel->toe (the work CRS is a conformal UTM zone, so the planar
+    bearing IS the compass bearing). Zero-length legs are skipped; None when
+    nothing qualifies. This is the self-consistent azimuth of an adopted
+    inventory — derived from the same geometry the wells carry, it cannot
+    disagree with their coordinates.
+
+    Dominant, not mean: a unit can itself mix orientation families (eqv
+    expedition/harrisonwc hold a ~53° majority AND a ~170° N-S minority;
+    in-unit R 0.58-0.61), and a plain circular mean strands between the modes
+    exactly like the toucan neighborhood mean did. The axial mean is pulled
+    toward the heavier mode, so iteratively trimming bearings more than
+    _STICKS_AZ_TRIM_DEG off-axis converges on the majority family."""
+    bearings: list[float] = []
+    for w in wells:
+        for leg in w.legs:
+            dx = leg.toe_xy[0] - leg.heel_xy[0]
+            dy = leg.toe_xy[1] - leg.heel_xy[1]
+            if math.hypot(dx, dy) > 0.0:
+                bearings.append(math.degrees(math.atan2(dx, dy)) % 180.0)
+    az, _r = axial_mean_deg(bearings)
+    if az is None:
+        return None
+    while True:
+        kept = [b for b in bearings if _axial_dist_deg(b, az) <= _STICKS_AZ_TRIM_DEG]
+        if not kept or len(kept) == len(bearings):
+            return az
+        bearings = kept
+        az, _r = axial_mean_deg(bearings)
+        assert az is not None                    # kept is non-empty
+
+
+def resolve_baseline_azimuth(
+    kept: list[InventoryWell],
+    neighborhood: AzimuthStats | None,
+    parcel: BaseGeometry,
+) -> float:
+    """The cross-section frame azimuth for an adopted (curate) baseline, in
+    order of trust:
+
+    1. the kept in-unit sticks' own bearings — adopted inventory carries real
+       geometry, so its axial mean is self-consistent with the coordinates by
+       construction;
+    2. the neighborhood grid azimuth, ONLY when its coherence gate passes;
+    3. the parcel's long axis.
+
+    The toucan defect (diagnosed 2026-08-03): the old code took the 1-mi
+    neighborhood circular mean UNCONDITIONALLY. Around toucan that population
+    is bimodal (~57° modern grid + ~0°/175° N-S cluster, R 0.62-0.71 — below
+    the 0.85 trust floor), so wells that plainly run ~57° were stamped 24-41°,
+    and the gunbarrel offsets were projected on that phantom axis. Never use
+    an unconfident neighborhood mean."""
+    az = sticks_azimuth_deg(kept)
+    if az is None and neighborhood is not None and neighborhood.confident:
+        az = neighborhood.azimuth_deg
+    if az is None:
+        az = dominant_azimuth(parcel)
+    return round(az % 180.0, 1)
 
 
 def _classify_membership(
@@ -710,12 +800,12 @@ def inventory_from_warehouse(
     that fail membership come back flagged `context=True` (visual background only).
     gunbarrel_x is the CANONICAL cross-section offset — placement.cross_axis(az)
     from the parcel centroid, the same frame generated wells use, so curate,
-    override and context populations overlay in one gun-barrel."""
+    override and context populations overlay in one gun-barrel. The frame
+    azimuth comes from the kept sticks THEMSELVES (resolve_baseline_azimuth);
+    the neighborhood grid stat is a fallback only, and only when confident."""
     aoi = parcel_to_ewkt_4326(parcel)
     fetch_ft = max(buffer_ft, context_radius_ft or 0.0)
     buf_m = fetch_ft / FT_PER_M
-    az = (lateral_azimuth_stats(conn, parcel, buffer_ft=max(fetch_ft, 5280.0))
-          .azimuth_deg or 0.0)
     items: list[tuple[InventoryWell, tuple[float, float]]] = []
 
     with conn.cursor() as cur:
@@ -724,7 +814,7 @@ def inventory_from_warehouse(
             for fb, tvd, _ll, api10, hlon, hlat, tlon, tlat in cur.fetchall():
                 if None not in (hlon, hlat, tlon, tlat):
                     items.append(_passthrough_well(fb, tvd, api10, None, "pdp",
-                                                   hlon, hlat, tlon, tlat, az,
+                                                   hlon, hlat, tlon, tlat,
                                                    fallback_name=api10))
         stick_cats = [c.upper() for c in categories if c in ("pud", "res")]
         if stick_cats:
@@ -732,7 +822,7 @@ def inventory_from_warehouse(
             for sid, fb, tvd, uid, cat, status, pc3, infl, hlon, hlat, tlon, tlat in cur.fetchall():
                 if None not in (hlon, hlat, tlon, tlat):
                     items.append(_passthrough_well(fb, tvd, uid, uid, cat,
-                                                   hlon, hlat, tlon, tlat, az,
+                                                   hlon, hlat, tlon, tlat,
                                                    fallback_name=f"{cat}-{sid}",
                                                    recon_status=status,
                                                    pdp_count_3mi=pc3, inflation_ratio=infl,
@@ -744,8 +834,16 @@ def inventory_from_warehouse(
         well.context = True
 
     all_items = kept + context
+    # Frame azimuth from the kept sticks' own geometry; the neighborhood stat
+    # is only fetched (and only trusted) when the unit holds nothing to adopt.
+    neighborhood = (
+        lateral_azimuth_stats(conn, parcel, buffer_ft=max(fetch_ft, 5280.0))
+        if not kept else None
+    )
+    az = resolve_baseline_azimuth([w for w, _ in kept], neighborhood, parcel)
     origin = (parcel.centroid.x, parcel.centroid.y)
     for well, cross in all_items:
+        well.lateral_azimuth_deg = az
         well.legs[0].gunbarrel_x_ft = round(gunbarrel_offset_ft(cross, az, origin), 1)
     return [w for w, _ in all_items]
 
