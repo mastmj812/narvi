@@ -224,3 +224,89 @@ def test_classify_for_handoff_overrides():
     with pytest.raises(HTTPException) as exc:
         _classify_for_handoff(None, [w("prod", category="pdp")], {"prod": "PUD"})
     assert "PDP is fixed" in exc.value.detail
+
+
+def _inv_well(name, category="generated"):
+    from narvi.records import InventoryWell, Leg
+
+    leg = Leg(heel_xy=(0.0, 0.0), toe_xy=(3000.0, 0.0), heel_lonlat=(-103.8, 31.9),
+              toe_lonlat=(-103.77, 31.9), length_ft=9842.5, gunbarrel_x_ft=0.0)
+    return InventoryWell(
+        scenario_id="s", deal_id="d", well_name=name, well_type="single",
+        formation="WCA_1", target_tvd_ft=11500.0, lateral_azimuth_deg=90.0,
+        legs=[leg], turn=None, completed_lateral_ft=9842.5,
+        drilled_lateral_ft=9842.5, nearest_neighbor_spacing_ft=880.0,
+        setback_ft=330.0, category=category)
+
+
+class _FakeConn:
+    """Just enough connection to feed _guard_override_drop persisted summaries."""
+
+    def __init__(self, summaries):
+        self._rows = [(s,) for s in summaries]
+
+    def cursor(self):
+        rows = self._rows
+
+        class _Cur:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def execute(self, sql, params):
+                pass
+
+            def fetchall(self):
+                return rows
+
+        return _Cur()
+
+
+def test_dropped_overrides_pure():
+    from app.api.scenarios import _dropped_overrides
+
+    persisted = {"category_overrides": {"a": "UPSIDE", "b": "PUD", "gone": "UPSIDE"}}
+    working = {"a", "b", "c"}
+    # empty incoming drops every key still in the working set; a key whose well
+    # left the working set ('gone') is the normal prune, not a drop
+    assert _dropped_overrides(persisted, {}, working) == {"a": "UPSIDE", "b": "PUD"}
+    # a re-sent key (same or re-toggled value) is never a drop
+    assert _dropped_overrides(persisted, {"a": "PUD", "b": "PUD"}, working) == {}
+    # no persisted overrides / no summary -> nothing to protect
+    assert _dropped_overrides({}, {}, working) == {}
+    assert _dropped_overrides(None, {}, working) == {}
+    assert _dropped_overrides({"category_overrides": None}, {}, working) == {}
+
+
+def test_guard_override_drop_409_and_force():
+    """A re-save whose incoming overrides silently lose persisted keys for wells
+    still in the plan is a 409 with the dropped set in the detail; force=true
+    and a prune-only loss both pass (the toucan_2 shipped-workbook guard)."""
+    import pytest
+    from fastapi import HTTPException
+
+    from app.api.scenarios import _guard_override_drop
+
+    wells = [_inv_well("gen1"), _inv_well("gen2"), _inv_well("prod", category="pdp")]
+    conn = _FakeConn([{"category_overrides": {"gen1": "UPSIDE", "gen2": "PUD"}}])
+
+    with pytest.raises(HTTPException) as exc:
+        _guard_override_drop(conn, "d", "s", None, {}, wells, force=False)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "override_drop"
+    assert exc.value.detail["dropped_overrides"] == {"gen1": "UPSIDE", "gen2": "PUD"}
+
+    # force acknowledges the revert-to-auto
+    _guard_override_drop(conn, "d", "s", None, {}, wells, force=True)
+
+    # incoming that carries the keys (even re-toggled) passes
+    _guard_override_drop(conn, "d", "s", None,
+                         {"gen1": "PUD", "gen2": "PUD"}, wells, force=False)
+
+    # keys whose wells left the working set are prune semantics, not drops
+    _guard_override_drop(conn, "d", "s", None, {}, [_inv_well("other")], force=False)
+
+    # first save of a scenario (no persisted row) never conflicts
+    _guard_override_drop(_FakeConn([]), "d", "s", None, {}, wells, force=False)

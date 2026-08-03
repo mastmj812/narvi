@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import {
   api,
+  ApiError,
   type Category,
   type ComposedSummary,
   type CurateSummary,
@@ -10,6 +11,7 @@ import {
   type GunbarrelData,
   type InventoryResponse,
   type DirectionFeasibility,
+  type OverrideDropDetail,
   type OverrideSummary,
   type Params,
   type ParcelInfo,
@@ -556,7 +558,7 @@ export const useStore = create<State>((set, get) => ({
     const categoryOverrides = pruneOverrides(s);
     try {
       const finalName = name || s.parcel.label;
-      await api.saveComposedScenario({
+      const body = {
         deal_id: deal, scenario_id: `plan_${slug}`, name: finalName,
         parcel: s.parcel.geojson,
         bench_sources: s.benchSource,
@@ -566,7 +568,30 @@ export const useStore = create<State>((set, get) => ({
         params: s.params,
         zones: zonesForGenerate(s),
         source_azimuth: s.sourceAzimuth,
-      });
+      };
+      try {
+        await api.saveComposedScenario(body);
+      } catch (e) {
+        // 409 override_drop: the PERSISTED scenario carries PUD/UPSIDE overrides
+        // on wells still in this plan that this save would silently reset to
+        // auto — usually a client whose override state was cleared between load
+        // and save (parcel reselect; the toucan_2 shipped-workbook incident).
+        // Confirm the revert explicitly, then retry with force.
+        const detail = e instanceof ApiError && e.status === 409
+          ? (e.detail as Partial<OverrideDropDetail> | null) : null;
+        if (detail?.code !== "override_drop") throw e;
+        const dropped = detail.dropped_overrides ?? {};
+        const wells = Object.entries(dropped)
+          .map(([w, c]) => `  • ${w} — saved as ${c}`).join("\n");
+        const ok = window.confirm(
+          `The saved scenario has ${Object.keys(dropped).length} per-well ` +
+          `PUD/UPSIDE override(s) that this save would reset to the automatic ` +
+          `classification:\n\n${wells}\n\n` +
+          `If you didn't intend to clear them, cancel and re-load the scenario ` +
+          `first. Save anyway and discard these overrides?`);
+        if (!ok) return;
+        await api.saveComposedScenario({ ...body, force: true });
+      }
       await get().refreshScenarios();
       // the saved scenario is now "the one we're working on" — the loaded marker
       // and the name box follow it (a legacy-loaded id is superseded by plan_*)

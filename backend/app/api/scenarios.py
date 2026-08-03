@@ -56,6 +56,69 @@ def _classify_for_handoff(
         raise HTTPException(status_code=400, detail="; ".join(problems))
 
 
+def _dropped_overrides(
+    persisted_summary: dict | None,
+    incoming: dict[str, str],
+    working_names: set[str],
+) -> dict[str, str]:
+    """Persisted per-well overrides an incoming save would silently discard:
+    keys in the stored summary's category_overrides that are absent from the
+    incoming set yet still name a well in the incoming working set. Keys for
+    wells NO LONGER in the working set are not drops — that is the normal
+    client-side prune when a bench turns off or a regenerate removes a well.
+    A key present with a different value is a deliberate re-toggle, not a drop."""
+    prior = (persisted_summary or {}).get("category_overrides") or {}
+    return {n: c for n, c in prior.items()
+            if n not in incoming and n in working_names}
+
+
+def _guard_override_drop(
+    conn: psycopg.Connection,
+    deal_id: str,
+    scenario_id: str,
+    name: str | None,
+    incoming: dict[str, str],
+    wells: list[InventoryWell],
+    force: bool,
+) -> None:
+    """Refuse (409) a re-save that would wipe persisted PUD/UPSIDE overrides
+    for wells still in the plan, unless the client sends force=true. A client
+    whose override state was reset between load and save (parcel reselect)
+    produces a save byte-identical to a deliberate revert-to-auto — that
+    silently flipped 4 wells PUD->UPSIDE in a shipped workbook (toucan_2).
+    `name` extends the guard to the same-name row a composed save replaces."""
+    if force:
+        return
+    working = {w.well_name for w in wells if w.category != "pdp"}
+    with conn.cursor() as cur:
+        if name:
+            cur.execute(
+                "SELECT summary FROM narvi.scenario "
+                "WHERE deal_id = %s AND (scenario_id = %s OR name = %s)",
+                (deal_id, scenario_id, name))
+        else:
+            cur.execute(
+                "SELECT summary FROM narvi.scenario "
+                "WHERE deal_id = %s AND scenario_id = %s",
+                (deal_id, scenario_id))
+        rows = cur.fetchall()
+    dropped: dict[str, str] = {}
+    for (summary,) in rows:
+        dropped.update(_dropped_overrides(summary, incoming, working))
+    if dropped:
+        listing = ", ".join(f"{n} (saved {c})" for n, c in sorted(dropped.items()))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "override_drop",
+                "message": (
+                    f"re-save would drop {len(dropped)} persisted PUD/UPSIDE "
+                    f"override(s) for wells still in the plan: {listing}; "
+                    "re-send with force=true to revert them to auto"),
+                "dropped_overrides": dropped,
+            })
+
+
 @router.get("", response_model=list[ScenarioSummary])
 def list_scenarios(
     deal_id: str | None = None, conn: psycopg.Connection = Depends(get_conn)
@@ -84,6 +147,9 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     culled = set(req.culled_wells)
     if culled:
         wells = [w for w in wells if w.well_name not in culled]
+    # no name-keyed replace on this legacy path — only the id row is overwritten
+    _guard_override_drop(conn, req.deal_id, req.scenario_id, None,
+                         req.category_overrides, wells, req.force)
     _classify_for_handoff(conn, wells, req.category_overrides)
     apply_novi_rep(conn, wells)
     # after culls + overrides (both key on the short generated names): persisted
@@ -116,6 +182,8 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
         raise HTTPException(status_code=400, detail="no inventory wells in the kept selection")
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
+    _guard_override_drop(conn, req.deal_id, req.scenario_id, None,
+                         req.category_overrides, wells, req.force)
     _classify_for_handoff(conn, wells, req.category_overrides)
     apply_novi_rep(conn, wells)
     # synthetic header params: a curate baseline is pass-through singles, not a run
@@ -186,6 +254,8 @@ def save_composed(
         raise HTTPException(status_code=400, detail="composed plan has no wells")
     for w in wells:
         w.deal_id, w.scenario_id = req.deal_id, req.scenario_id
+    _guard_override_drop(conn, req.deal_id, req.scenario_id, req.name,
+                         req.category_overrides, wells, req.force)
     _classify_for_handoff(conn, wells, req.category_overrides)
     apply_novi_rep(conn, wells)
     # after culls + overrides (both key on the short generated names): persisted
