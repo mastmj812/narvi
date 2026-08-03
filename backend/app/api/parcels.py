@@ -52,8 +52,9 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     parcel = parcel_from_geojson(req.parcel)
     # membership is decided by co-extent overlap inside inventory_from_warehouse;
     # near-parcel PDP comes back flagged context=true (visual background only).
-    wells = inventory_from_warehouse(conn, parcel, req.buffer_ft, tuple(req.categories),
-                                     context_radius_ft=req.context_radius_ft)
+    wells, _frame_az = inventory_from_warehouse(
+        conn, parcel, req.buffer_ft, tuple(req.categories),
+        context_radius_ft=req.context_radius_ft)
     # Handoff classification for display (PDP/PUD/UPSIDE). DB-free pass:
     # curated pud/res sticks already carry their intel_pdp_support counts.
     apply_handoff_support(None, wells)
