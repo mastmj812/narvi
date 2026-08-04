@@ -75,6 +75,11 @@ export interface ParcelInfo {
   label: string;
   area_ac: number;
   geojson: GeoJSON.Geometry;
+  // gpkg uploads carry land attributes (Type/Min_Depth/Max_Depth/WI...) and the
+  // Tract rows assigned to this DSU; shapefile zips (and older saves) omit them.
+  // Display/pass-through only.
+  attributes?: Record<string, unknown>;
+  tracts?: Array<{ label: string; attributes: Record<string, unknown> }>;
 }
 
 export interface BenchInfo {

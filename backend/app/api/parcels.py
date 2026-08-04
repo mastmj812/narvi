@@ -12,7 +12,7 @@ from shapely.geometry import mapping
 
 from narvi import (
     gunbarrel_data,
-    load_named_parcels,
+    load_parcels,
     parcel_feasibility,
     parcel_from_geojson,
     scenario_geojson,
@@ -121,20 +121,22 @@ def synthetic(side_ft: float = 5280.0, lon: float = -103.8, lat: float = 31.9) -
 
 @router.post("/upload", response_model=ParcelsResponse)
 async def upload(file: UploadFile = File(...)) -> ParcelsResponse:
+    """Deal upload: zipped shapefile (geometry-only, placeholder labels from the
+    FILE NAME) or GeoPackage (land-department deliverable — DSU rows become
+    parcels, Tract rows and attributes ride along for display)."""
     data = await file.read()
-    # geometry-only ingest: placeholder labels come from the ZIP NAME, never
-    # from shapefile attributes (the user renames deals in the app)
     stem = os.path.splitext(os.path.basename(file.filename or ""))[0]
     base = re.sub(r"[^a-z0-9]+", "_", stem.lower()).strip("_") or "parcel"
     try:
-        parcels = load_named_parcels(data, base_label=base)
+        parcels = load_parcels(data, base_label=base)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     out = [
         ParcelInfo(
-            label=label, area_ac=round(geom.area / _ACRE_M2, 1),
-            geojson=mapping(_to_wgs_geom(geom)),
+            label=p.label, area_ac=round(p.geom.area / _ACRE_M2, 1),
+            geojson=mapping(_to_wgs_geom(p.geom)),
+            attributes=p.attributes, tracts=p.tracts,
         )
-        for label, geom in parcels.items()   # file order (labels are numbered)
+        for p in parcels   # file order (placeholder labels are numbered)
     ]
     return ParcelsResponse(parcels=out)

@@ -12,8 +12,10 @@ from .feasibility import (
 )
 from .generate import generate_scenario, generate_wine_rack, qualify_planned_names
 from .parcel import (
+    ParcelRecord,
     load_named_parcels,
     load_parcel_zip,
+    load_parcels,
     parcel_from_geojson,
     synthetic_section,
 )
@@ -38,8 +40,10 @@ __all__ = [
     "generate_scenario",
     "generate_wine_rack",
     "qualify_planned_names",
+    "ParcelRecord",
     "load_named_parcels",
     "load_parcel_zip",
+    "load_parcels",
     "parcel_from_geojson",
     "synthetic_section",
     "Feasibility",
