@@ -20,6 +20,7 @@ from narvi import (
 )
 from narvi.viz import _to_wgs_geom
 from narvi.warehouse import (
+    apply_depth_window,
     apply_handoff_support,
     available_benches,
     bench_summary,
@@ -64,12 +65,17 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     # (producing TVD control within a buffer), not just what physically overlaps the
     # unit — e.g. WCA with plenty of nearby PDP but no well crossing this parcel.
     dev = available_benches(conn, parcel, buffer_ft=5280.0)
+    # Deal depth window (engineer-entered, ft TVD): flag out-of-window benches in
+    # BOTH menus. Soft — flagged benches stay selectable; the UI seeds them off.
+    if req.min_depth_ft is not None or req.max_depth_ft is not None:
+        apply_depth_window(benches, req.min_depth_ft, req.max_depth_ft)
+        apply_depth_window(dev, req.min_depth_ft, req.max_depth_ft)
 
     def _bm(b):
         return BenchInfoModel(
             formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
             n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
-            note=b.note, n_supported=b.n_supported)
+            note=b.note, n_supported=b.n_supported, depth_allowed=b.depth_allowed)
 
     return InventoryResponse(
         well_count=len(unit_wells),

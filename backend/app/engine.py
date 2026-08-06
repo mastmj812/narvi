@@ -69,6 +69,21 @@ def run_generate(req: GenerateRequest):
         else:
             zones = None
 
+        # Deal depth-window audit note (soft — enabling the bench WAS the
+        # override): zones targeting a TVD outside the engineer's window
+        # generate normally, but the violation is recorded in the notes and
+        # therefore in the saved summary. Never blocks.
+        if req.min_depth_ft is not None or req.max_depth_ft is not None:
+            lo = req.min_depth_ft if req.min_depth_ft is not None else float("-inf")
+            hi = req.max_depth_ft if req.max_depth_ft is not None else float("inf")
+            targets = ([(z.formation, z.target_tvd_ft) for z in zones]
+                       if zones is not None else [(p.formation, p.target_tvd_ft)])
+            for fm, tvd in targets:
+                if tvd and not (lo <= tvd <= hi):
+                    notes.append(
+                        f"{fm} target {tvd:,.0f} ft TVD is outside the deal depth "
+                        f"window — engineer override")
+
         def _run(pp):
             if zones is not None:
                 ws, win, rep = generate_wine_rack(parcel, pp, zones)

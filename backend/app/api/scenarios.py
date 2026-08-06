@@ -280,6 +280,10 @@ def save_composed(
                 "source_azimuth": req.source_azimuth, "buffer_ft": req.buffer_ft,
             },
             "note": note, "warehouse_notes": notes,
+            # deal terms for the record: engineer's depth window + basis note +
+            # the declared gpkg attributes/tracts, so a reload restores the
+            # parcel card. Verbatim pass-through — nothing computes on it.
+            **({"deal_terms": req.deal_terms} if req.deal_terms else {}),
         },
         name=req.name, frame_azimuth_deg=frame_az)
     # NAME is the user-facing identity within a deal: saving under an existing
