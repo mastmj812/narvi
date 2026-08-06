@@ -36,6 +36,10 @@ export interface GenerateRequest {
   // score generated sticks vs the sql/30 qualifying-PDP gate and attach the
   // handoff category (PDP/PUD/UPSIDE) for display
   score_support?: boolean;
+  // deal depth window (ft TVD) — informational: out-of-window zones generate
+  // normally, a note lands in warehouse_notes (the bench enable was the override)
+  min_depth_ft?: number | null;
+  max_depth_ft?: number | null;
 }
 
 // workbook-handoff classification (auto: pdp_count_3mi >= 3 -> PUD; override
@@ -80,6 +84,22 @@ export interface ParcelInfo {
   // Display/pass-through only.
   attributes?: Record<string, unknown>;
   tracts?: Array<{ label: string; attributes: Record<string, unknown> }>;
+  // CLIENT-SIDE ONLY — never sent by the upload endpoint. The engineer's
+  // correlated depth window (ft TVD from surface) + its basis note; lives on
+  // the parcel so PARCEL_RESET / parcel-switch can't leave a stale window.
+  // Persists via SaveComposedBody.deal_terms; restored on scenario load.
+  depthWindow?: DepthWindow;
+}
+
+// The engineer's working depth window — typed after log correlation, NEVER
+// parsed from the land file (declared depths are often stratigraphic
+// equivalents of a reference log miles away; Toucan: 9,515' declared vs
+// ~9,950' correlated). Soft: out-of-window benches flag + seed off, stay
+// selectable.
+export interface DepthWindow {
+  minFt: number | null;
+  maxFt: number | null;
+  basis: string;                   // provenance, e.g. "correlated by RG, ref log 17 mi NW"
 }
 
 export interface BenchInfo {
@@ -91,6 +111,7 @@ export interface BenchInfo {
   suggested_spacing_ft: number | null;
   note: string;
   n_supported?: number | null;     // pud/res sticks with offset support (sql/30)
+  depth_allowed?: boolean | null;  // false = outside the deal depth window (soft flag)
 }
 
 export interface InventoryResponse {
@@ -138,6 +159,18 @@ export interface ComposedSummary {
   };
   note?: string;
   warehouse_notes?: string[];
+  deal_terms?: DealTerms;
+}
+
+// Deal terms persisted for the record inside the composed summary: the
+// engineer's window + basis, plus the declared gpkg attributes/tracts so a
+// reload restores the parcel card. Audit/display only — nothing computes on it.
+export interface DealTerms {
+  min_depth_ft?: number | null;
+  max_depth_ft?: number | null;
+  basis?: string;
+  attributes?: Record<string, unknown>;
+  tracts?: Array<{ label: string; attributes: Record<string, unknown> }>;
 }
 
 export interface SaveComposedBody {
@@ -152,6 +185,7 @@ export interface SaveComposedBody {
   params: Params;
   zones: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
   source_azimuth: boolean;
+  deal_terms?: DealTerms;
   // acknowledge dropping persisted PUD/UPSIDE overrides (409 override_drop
   // guard) — only set on the confirmed retry, never on the first attempt
   force?: boolean;
@@ -235,10 +269,14 @@ export const api = {
   syntheticParcel: () => jget<ParcelInfo>("/api/parcels/synthetic"),
 
   // context_radius_ft null = unit wells only (the PDP tile layer provides map
-  // context; the gun-barrel is a unit cross-section, not a neighborhood one)
+  // context; the gun-barrel is a unit cross-section, not a neighborhood one).
+  // min/max_depth_ft = the engineer's deal depth window: out-of-window benches
+  // come back with depth_allowed=false (soft flag, still selectable).
   inventory: (parcel: GeoJSON.Geometry, buffer_ft = 5280, categories: Category[] = ["pdp", "pud", "res"],
-    context_radius_ft: number | null = null) =>
-    jpost<InventoryResponse>("/api/parcels/inventory", { parcel, buffer_ft, categories, context_radius_ft }),
+    context_radius_ft: number | null = null,
+    min_depth_ft: number | null = null, max_depth_ft: number | null = null) =>
+    jpost<InventoryResponse>("/api/parcels/inventory",
+      { parcel, buffer_ft, categories, context_radius_ft, min_depth_ft, max_depth_ft }),
 
   // what each realistic bearing can hold (grid azimuth sourced server-side)
   feasibility: (parcel: GeoJSON.Geometry, p: Params) =>

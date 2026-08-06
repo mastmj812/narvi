@@ -56,6 +56,10 @@ class GenerateRequest(BaseModel):
     source_tvd: bool = False                   # wine-rack: source zone TVDs from warehouse
     source_azimuth: bool = False               # adopt the offset-well grid azimuth
     buffer_ft: float = 5280.0
+    # deal depth window (ft TVD) — informational only: zones outside it generate
+    # normally but a note lands in warehouse_notes (the enable was the override)
+    min_depth_ft: float | None = None
+    max_depth_ft: float | None = None
     # score generated sticks against the sql/30 qualifying-PDP gate (3 mi) and
     # attach the handoff category (PDP/PUD/UPSIDE) for display. Opt-in: it's a
     # warehouse round-trip, and a pure-geometry generate stays DB-free.
@@ -99,6 +103,11 @@ class InventoryRequest(BaseModel):
     # — offset wells a mile out just clutter it (user feedback, bro_time 1 4-9).
     # Context wells never persist or export.
     context_radius_ft: float | None = None
+    # deal depth window (ft TVD from surface) — the ENGINEER'S correlated number,
+    # never parsed from the land file. Benches outside come back flagged
+    # (depth_allowed=False), never removed.
+    min_depth_ft: float | None = None
+    max_depth_ft: float | None = None
 
 
 class BenchInfoModel(BaseModel):
@@ -110,6 +119,7 @@ class BenchInfoModel(BaseModel):
     suggested_spacing_ft: float | None
     note: str
     n_supported: int | None = None   # pud/res sticks with offset support (sql/30); null in dev menu
+    depth_allowed: bool | None = None  # False = outside the deal depth window (soft flag)
 
 
 class InventoryResponse(BaseModel):
@@ -206,6 +216,11 @@ class SaveComposedRequest(BaseModel):
     source_azimuth: bool = True
     buffer_ft: float = 5280.0
     category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
+    # deal terms carried for the record (rides summary jsonb verbatim): the
+    # engineer's depth window + basis note, plus the declared land attributes /
+    # tract rows from the gpkg upload so a reload restores the parcel card.
+    # Display/audit only — server logic never computes on it.
+    deal_terms: dict[str, Any] | None = None
     # acknowledge dropping persisted overrides (see the 409 override_drop guard
     # in scenarios.py) — never set on a first attempt
     force: bool = False

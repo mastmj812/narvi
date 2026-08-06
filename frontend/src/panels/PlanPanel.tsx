@@ -47,7 +47,18 @@ export function PlanPanel() {
     categoryOverrides, toggleCategoryOverride,
     selectParcel, renameParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
     toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, generate,
+    setDepthWindow,
   } = s;
+
+  const dw = parcel?.depthWindow;
+  const windowActive = dw != null && (dw.minFt != null || dw.maxFt != null);
+  const attrs = parcel?.attributes ?? {};
+  const attr = (k: string) => {
+    const v = attrs[k];
+    return v == null || v === "" ? null : String(v);
+  };
+  const hasDeclaredTerms = attr("Min_Depth") != null || attr("Max_Depth") != null
+    || attr("DSU_WI") != null || (parcel?.tracts ?? []).length > 0;
 
   const rows = benchRows(s);
   const zones = zonesForGenerate(s);
@@ -138,6 +149,85 @@ export function PlanPanel() {
         {error && <div className="error">{error}</div>}
       </div>
 
+      {parcel && (
+        <div className="section">
+          <h2>Deal terms</h2>
+          {hasDeclaredTerms && (
+            <>
+              <div
+                className="note"
+                title="Depth text from the land department's file, shown verbatim. It may reference a stratigraphic-equivalent depth on a log miles away — never used for math here; enter the correlated window below."
+              >
+                declared (land file — uncorrelated)
+              </div>
+              {(attr("Min_Depth") != null || attr("Max_Depth") != null) && (
+                <div className="field">
+                  <label>depths</label>
+                  <span style={{ fontSize: 12 }}>
+                    {attr("Min_Depth") ?? "—"} → {attr("Max_Depth") ?? "—"}
+                  </span>
+                </div>
+              )}
+              {(attr("DSU_WI") != null || attr("DSU_NRI") != null) && (
+                <div className="field">
+                  <label>DSU WI / NRI</label>
+                  <span style={{ fontSize: 12 }}>
+                    {attr("DSU_WI") ?? "—"} / {attr("DSU_NRI") ?? "—"}
+                  </span>
+                </div>
+              )}
+              {(parcel.tracts ?? []).map((t) => {
+                const ta = (k: string) => {
+                  const v = t.attributes[k];
+                  return v == null || v === "" ? null : String(v);
+                };
+                return (
+                  <div className="field" key={t.label} style={{ paddingLeft: 12 }}>
+                    <label style={{ color: "var(--muted)", fontSize: 11 }}>{t.label}</label>
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                      {[
+                        ta("Tract_WI") != null ? `WI ${ta("Tract_WI")}` : null,
+                        ta("Tract_NRI") != null ? `NRI ${ta("Tract_NRI")}` : null,
+                        ta("Max_Depth") != null ? `→ ${ta("Max_Depth")}` : null,
+                      ].filter(Boolean).join(" · ") || "—"}
+                    </span>
+                  </div>
+                );
+              })}
+            </>
+          )}
+          <div
+            className="note"
+            title="The number that drives bench flagging — YOUR correlated depth, typed here, never parsed from the file. Soft: out-of-window benches grey out and seed off but stay selectable."
+          >
+            working window (correlated, ft TVD)
+          </div>
+          <div className="field">
+            <label style={{ fontSize: 11 }}>min / max</label>
+            <span>
+              <input type="number" step={50} style={{ width: 64 }}
+                value={dw?.minFt ?? ""} placeholder="surface"
+                onChange={(e) => setDepthWindow({
+                  minFt: e.target.value === "" ? null : Number(e.target.value) })} />
+              {" – "}
+              <input type="number" step={50} style={{ width: 64 }}
+                value={dw?.maxFt ?? ""} placeholder="open"
+                onChange={(e) => setDepthWindow({
+                  maxFt: e.target.value === "" ? null : Number(e.target.value) })} />
+            </span>
+          </div>
+          <div className="field">
+            <label style={{ fontSize: 11 }}
+              title="Provenance of the window — e.g. 'correlated by RG; declared 9,515 on ref log 17 mi NW → ~9,950 local'. Saves with the scenario.">
+              basis
+            </label>
+            <input type="text" style={{ width: 150, fontSize: 11 }}
+              value={dw?.basis ?? ""} placeholder="who correlated it, and from what"
+              onChange={(e) => setDepthWindow({ basis: e.target.value })} />
+          </div>
+        </div>
+      )}
+
       <div className="section">
         <h2>Show</h2>
         {CATS.map((c) => (
@@ -150,11 +240,23 @@ export function PlanPanel() {
 
       <div className="section">
         <h2>Benches</h2>
+        {windowActive && (
+          <div
+            className="note"
+            title="Benches whose median landing TVD falls outside the working window are greyed and seed to off — but stay selectable. Turning one on is the engineer override (recorded in the scenario notes)."
+          >
+            depth window {dw?.minFt != null ? dw.minFt.toLocaleString() : "surface"}
+            {"–"}
+            {dw?.maxFt != null ? `${dw.maxFt.toLocaleString()} ft` : "open"} TVD active
+            — flagged benches are overridable
+          </div>
+        )}
         {rows.length === 0 && (
           <div className="note">pick a deal and load its inventory to see benches</div>
         )}
         {rows.map((b) => {
           const src = benchSource[b.formation] ?? "off";
+          const flagged = b.depthAllowed === false;
           const ctrl = [b.n_pdp ? `${b.n_pdp} PDP` : null, b.n_pud ? `${b.n_pud} PUD` : null,
             b.n_res ? `${b.n_res} RES` : null,
             (b.n_supported != null && b.n_pud + b.n_res > 0)
@@ -162,11 +264,16 @@ export function PlanPanel() {
           ].filter(Boolean).join(" · ") || "no control";
           const sp = benchSpacing[b.formation] ?? b.suggested_spacing_ft ?? params.spacing_ft;
           return (
-            <div key={b.formation} style={{ marginBottom: 4, opacity: src === "off" ? 0.55 : 1 }}>
+            <div key={b.formation}
+              style={{ marginBottom: 4, opacity: src === "off" ? (flagged ? 0.45 : 0.55) : 1 }}>
               <div className="field">
-                <label title={`${ctrl}${b.median_tvd_ft != null ? ` @ ${b.median_tvd_ft.toLocaleString()}' TVD` : ""}`}>
+                <label
+                  title={`${ctrl}${b.median_tvd_ft != null ? ` @ ${b.median_tvd_ft.toLocaleString()}' TVD` : ""}${
+                    flagged ? " — OUTSIDE the deal depth window (soft flag; enabling is an engineer override)" : ""}`}
+                >
                   <i className="swatch" style={{ background: colorForBlueox(b.formation) }} />
                   {" "}{b.formation}
+                  {flagged && <span style={{ color: "#b45309" }} aria-label="outside depth window"> ⚠</span>}
                   {b.median_tvd_ft != null && (
                     <span style={{ color: "var(--muted)" }}> {Math.round(b.median_tvd_ft).toLocaleString()}'</span>
                   )}

@@ -440,6 +440,42 @@ class BenchInfo:
     # where not computed (the dev-benches menu). Kept after `note` so existing
     # positional BenchInfo(...) constructions are unaffected.
     n_supported: int | None = None
+    # deal depth-window verdict (apply_depth_window): False = bench median TVD
+    # falls outside the engineer-entered window (SOFT flag — display + default-
+    # off seeding only, never a removal); None = no window supplied. Appended
+    # after n_supported per the same positional-construction rule.
+    depth_allowed: bool | None = None
+
+
+def apply_depth_window(
+    benches: list[BenchInfo],
+    min_depth_ft: float | None,
+    max_depth_ft: float | None,
+) -> None:
+    """Flag benches outside the deal's depth window (ft TVD from surface).
+
+    The window is the ENGINEER'S number (typed after log correlation), never a
+    value parsed from the land file — declared depths are often stratigraphic
+    equivalents of a reference log miles away (Toucan: declared 9,515' vs
+    ~9,950' correlated). Soft by design: out-of-window benches get
+    depth_allowed=False and a reason note but are never dropped; enabling one
+    in the app is the override. Benches with no median TVD stay None (nothing
+    to compare)."""
+    if min_depth_ft is None and max_depth_ft is None:
+        return
+    lo = min_depth_ft if min_depth_ft is not None else float("-inf")
+    hi = max_depth_ft if max_depth_ft is not None else float("inf")
+    # plain ASCII hyphen: these notes persist into jsonb and surface in consoles
+    # and exports where an en dash mangles under cp1252
+    span = (f"{min_depth_ft:,.0f}" if min_depth_ft is not None else "surface",
+            f"{max_depth_ft:,.0f} ft" if max_depth_ft is not None else "open")
+    for b in benches:
+        if b.median_tvd_ft is None:
+            continue
+        b.depth_allowed = lo <= b.median_tvd_ft <= hi
+        if not b.depth_allowed:
+            reason = f"outside deal depth window {span[0]}-{span[1]} TVD"
+            b.note = f"{b.note}; {reason}" if b.note else reason
 
 
 def available_benches(
