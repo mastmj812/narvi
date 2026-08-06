@@ -71,9 +71,9 @@ export function PlanPanel() {
         <h2>Deals</h2>
         <div className="row">
           <button className="ghost" onClick={() => loadSynthetic()}>Synthetic</button>
-          <button className="ghost" onClick={() => fileRef.current?.click()}>Upload .zip</button>
+          <button className="ghost" onClick={() => fileRef.current?.click()}>Upload .zip / .gpkg</button>
         </div>
-        <input ref={fileRef} type="file" accept=".zip" style={{ display: "none" }}
+        <input ref={fileRef} type="file" accept=".zip,.gpkg" style={{ display: "none" }}
           onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadParcels(f); }} />
         {parcels.length > 0 && (
           <div style={{ marginTop: 8, maxHeight: 180, overflowY: "auto" }}>

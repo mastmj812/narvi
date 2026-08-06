@@ -77,6 +77,11 @@ class ParcelInfo(BaseModel):
     label: str
     area_ac: float
     geojson: dict[str, Any]                    # WGS84 (Multi)Polygon
+    # gpkg deliverables carry land attributes (Type/Min_Depth/Max_Depth/WI...)
+    # and the Tract rows assigned to this DSU; shapefile zips leave both empty.
+    # Display/pass-through only — nothing downstream computes on these.
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    tracts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ParcelsResponse(BaseModel):
