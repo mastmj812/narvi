@@ -11,6 +11,8 @@ import {
   type GunbarrelData,
   type InventoryResponse,
   type DirectionFeasibility,
+  type DealTerms,
+  type DepthWindow,
   type OverrideDropDetail,
   type OverrideSummary,
   type Params,
@@ -71,27 +73,43 @@ export interface BenchRow {
   suggested_spacing_ft: number | null;
   hasNovi: boolean;               // any overlapping PUD/RES to adopt
   n_supported: number | null;     // pud/res sticks with offset support (sql/30); null in dev-only
+  depthAllowed: boolean | null;   // false = outside the deal depth window (soft flag)
 }
 
-export function benchRows(s: Pick<State, "benches" | "devBenches">): BenchRow[] {
+// Client-side mirror of the engine's apply_depth_window arithmetic
+// (src/narvi/warehouse.py) — recomputed here from the parcel's window so
+// editing the window updates the bench flags instantly, without an inventory
+// re-fetch. Keep the two in step.
+export function depthAllowedFor(
+  tvd: number | null, w: DepthWindow | undefined,
+): boolean | null {
+  if (!w || (w.minFt == null && w.maxFt == null) || tvd == null) return null;
+  return tvd >= (w.minFt ?? -Infinity) && tvd <= (w.maxFt ?? Infinity);
+}
+
+export function benchRows(s: Pick<State, "benches" | "devBenches" | "parcel">): BenchRow[] {
   const map = new Map<string, BenchRow>();
+  const w = s.parcel?.depthWindow;
   for (const b of s.devBenches) {
     map.set(b.formation, {
       formation: b.formation, median_tvd_ft: b.median_tvd_ft,
       n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
       suggested_spacing_ft: b.suggested_spacing_ft, hasNovi: false,
       n_supported: null,
+      depthAllowed: depthAllowedFor(b.median_tvd_ft, w),
     });
   }
   for (const b of s.benches) {
     const dev = map.get(b.formation);
+    const tvd = dev?.median_tvd_ft ?? b.median_tvd_ft;
     map.set(b.formation, {
       formation: b.formation,
-      median_tvd_ft: dev?.median_tvd_ft ?? b.median_tvd_ft,
+      median_tvd_ft: tvd,
       n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
       suggested_spacing_ft: dev?.suggested_spacing_ft ?? b.suggested_spacing_ft,
       hasNovi: b.n_pud + b.n_res > 0,
       n_supported: b.n_supported ?? null,
+      depthAllowed: depthAllowedFor(tvd, w),
     });
   }
   return [...map.values()].sort(
@@ -99,18 +117,25 @@ export function benchRows(s: Pick<State, "benches" | "devBenches">): BenchRow[] 
 }
 
 // Default sources on inventory load: adopt Novi wherever the unit has PUD/RES;
-// everything else (dev-only or PDP-only benches) starts off.
-function seedBenchSources(inv: InventoryResponse): Record<string, BenchSource> {
+// everything else (dev-only or PDP-only benches) starts off. A bench outside
+// the deal depth window seeds off even with Novi sticks (SOFT: the user can
+// still flip it on — that's the override).
+function seedBenchSources(
+  inv: InventoryResponse, w: DepthWindow | undefined,
+): Record<string, BenchSource> {
   const src: Record<string, BenchSource> = {};
   for (const b of inv.dev_benches) src[b.formation] = "off";
-  for (const b of inv.benches) src[b.formation] = b.n_pud + b.n_res > 0 ? "novi" : "off";
+  for (const b of inv.benches) {
+    const allowed = depthAllowedFor(b.median_tvd_ft, w);
+    src[b.formation] = b.n_pud + b.n_res > 0 && allowed !== false ? "novi" : "off";
+  }
   return src;
 }
 
 // The generator zones implied by the bench table: every generate-sourced bench,
 // TVD/spacing resolved hard-override -> bench control -> deal-level default.
 export function zonesForGenerate(
-  s: Pick<State, "benches" | "devBenches" | "benchSource" | "benchTvd" | "benchSpacing" | "params">,
+  s: Pick<State, "benches" | "devBenches" | "benchSource" | "benchTvd" | "benchSpacing" | "params" | "parcel">,
 ): { formation: string; target_tvd_ft: number; spacing_ft: number }[] {
   return benchRows(s)
     .filter((r) => s.benchSource[r.formation] === "generate")
@@ -134,6 +159,10 @@ export function buildRequestFrom(
     // score fresh sticks so the gun-barrel shows the handoff category (the
     // same PDP/PUD/UPSIDE the workbook inventory tab will carry)
     score_support: true,
+    // deal depth window rides the recipe: out-of-window zones generate normally
+    // but the violation lands in warehouse_notes (and the saved summary)
+    min_depth_ft: s.parcel.depthWindow?.minFt ?? null,
+    max_depth_ft: s.parcel.depthWindow?.maxFt ?? null,
   };
 }
 
@@ -311,6 +340,9 @@ interface State {
   // rename a deal in place (uploads carry placeholder labels — the shapefile is
   // geometry-only; the user names deals). Keeps inventory/results: same geometry.
   renameParcel: (oldLabel: string, newLabel: string) => void;
+  // the engineer's correlated depth window — lives ON the selected parcel (so
+  // parcel switches/resets carry the right window); flags recompute instantly
+  setDepthWindow: (patch: Partial<DepthWindow>) => void;
   loadSynthetic: () => Promise<void>;
   uploadParcels: (file: File) => Promise<void>;
   // seed: false keeps the current bench sources / params instead of reseeding
@@ -413,6 +445,19 @@ export const useStore = create<State>((set, get) => ({
       };
     }),
 
+  setDepthWindow: (patch) =>
+    set((s) => {
+      if (!s.parcel) return {};
+      const dw: DepthWindow = {
+        minFt: null, maxFt: null, basis: "", ...s.parcel.depthWindow, ...patch,
+      };
+      const label = s.parcel.label;
+      return {
+        parcel: { ...s.parcel, depthWindow: dw },
+        parcels: s.parcels.map((p) => (p.label === label ? { ...p, depthWindow: dw } : p)),
+      };
+    }),
+
   loadSynthetic: async () => {
     try {
       const p = await api.syntheticParcel();
@@ -435,15 +480,17 @@ export const useStore = create<State>((set, get) => ({
     if (!s.parcel) return;
     const seed = opts?.seed ?? true;
     set({ loading: true, error: null });
+    const dw = s.parcel.depthWindow;
     try {
-      const inv = await api.inventory(s.parcel.geojson);
+      const inv = await api.inventory(s.parcel.geojson, 5280, ["pdp", "pud", "res"],
+        null, dw?.minFt ?? null, dw?.maxFt ?? null);
       const sourceable = inv.dev_benches.filter((b) => b.n_pdp >= 3);
       const shallow = sourceable.find((b) => b.median_tvd_ft != null)
         ?? inv.benches.find((b) => b.median_tvd_ft != null);
       set({
         inventory: inv, benches: inv.benches, devBenches: inv.dev_benches,
         ...(seed ? {
-          benchSource: seedBenchSources(inv),
+          benchSource: seedBenchSources(inv, dw),
           params: shallow
             ? { ...get().params, formation: shallow.formation,
                 target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }
@@ -556,6 +603,17 @@ export const useStore = create<State>((set, get) => ({
     // regenerate dropped a well) would 400 the save — prune to the wells
     // that actually exist, and keep the store in step.
     const categoryOverrides = pruneOverrides(s);
+    // Deal terms ride the summary for the record: engineer's window + basis,
+    // plus the declared gpkg attributes/tracts so a reload restores the card.
+    const dw = s.parcel.depthWindow;
+    const hasTerms = (dw && (dw.minFt != null || dw.maxFt != null || dw.basis))
+      || Object.keys(s.parcel.attributes ?? {}).length > 0
+      || (s.parcel.tracts ?? []).length > 0;
+    const dealTerms: DealTerms | undefined = hasTerms ? {
+      min_depth_ft: dw?.minFt ?? null, max_depth_ft: dw?.maxFt ?? null,
+      basis: dw?.basis ?? "",
+      attributes: s.parcel.attributes ?? {}, tracts: s.parcel.tracts ?? [],
+    } : undefined;
     try {
       const finalName = name || s.parcel.label;
       const body = {
@@ -568,6 +626,7 @@ export const useStore = create<State>((set, get) => ({
         params: s.params,
         zones: zonesForGenerate(s),
         source_azimuth: s.sourceAzimuth,
+        deal_terms: dealTerms,
       };
       try {
         await api.saveComposedScenario(body);
@@ -619,8 +678,20 @@ export const useStore = create<State>((set, get) => ({
         // the working set reconstructs editable, exactly as saved
         const cs = summary as ComposedSummary;
         const zones = cs.generate?.zones ?? [];
+        // rehydrate deal terms (depth window + declared gpkg attrs/tracts)
+        // onto the rebuilt parcel — the AOI in the DB is geometry-only
+        const dt = cs.deal_terms;
+        const restoredParcel: ParcelInfo = dt ? {
+          ...r.parcel,
+          attributes: dt.attributes ?? r.parcel.attributes,
+          tracts: dt.tracts ?? r.parcel.tracts,
+          depthWindow: (dt.min_depth_ft != null || dt.max_depth_ft != null || dt.basis)
+            ? { minFt: dt.min_depth_ft ?? null, maxFt: dt.max_depth_ft ?? null,
+                basis: dt.basis ?? "" }
+            : undefined,
+        } : r.parcel;
         set({
-          parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
+          parcels: mergeParcels(restoredParcel), parcel: restoredParcel, ...PARCEL_RESET,
           loaded: { deal_id, scenario_id, name: meta?.name ?? null },
           // DEFAULT_PARAMS base, NOT the current store: a load must replace
           // generator state, never layer the recipe over the previously
