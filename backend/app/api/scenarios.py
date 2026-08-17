@@ -1,14 +1,21 @@
 """Scenario persistence — list / load / save / delete generated inventory in the
 narvi schema. Save regenerates server-side from the same GenerateRequest, then
-persists, so the client never round-trips the geometry."""
+persists, so the client never round-trips the geometry.
+
+Each save endpoint is split into a read-only `prepare_*` half (regenerate +
+guard + classify + novi_rep + name qualification — everything up to the write)
+and the `persist.save_scenario` write. The bulk re-save tool (app.resave)
+reuses the SAME prepare functions for its dry-run diff and calls the endpoint
+functions themselves for --apply, so there is exactly one save code path."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import psycopg
 from fastapi import APIRouter, Depends, HTTPException
+from shapely.geometry.base import BaseGeometry
 
 from narvi import (
     gunbarrel_data, parcel_from_geojson, persist, qualify_planned_names,
@@ -134,8 +141,26 @@ def list_scenarios(
     ]
 
 
-@router.post("")
-def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn)) -> dict:
+@dataclass
+class PreparedSave:
+    """Everything a save endpoint computes BEFORE the persist write — the
+    regenerated wells with guards/classification/novi_rep/names applied, plus
+    the exact summary jsonb and frame azimuth `persist.save_scenario` would
+    store. Produced by the read-only prepare_* functions below; consumed by
+    the endpoints (which then write) and by app.resave (dry-run diff)."""
+
+    parcel: BaseGeometry
+    params: ScenarioParams
+    wells: list[InventoryWell]
+    summary: dict
+    name: str | None
+    frame_azimuth_deg: float | None
+
+
+def prepare_save(
+    req: SaveScenarioRequest, conn: psycopg.Connection
+) -> PreparedSave:
+    """Read-only compute half of the legacy generate save (POST /scenarios)."""
     try:
         parcel, p, wells, window, summary, notes = run_generate(req.generate)
     except ValueError as exc:
@@ -155,23 +180,30 @@ def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn))
     # after culls + overrides (both key on the short generated names): persisted
     # names carry the scenario label so merged-scenario consumers stay unique
     qualify_planned_names(wells, req.name or req.deal_id)
-    n = persist.save_scenario(
-        conn, req.deal_id, req.scenario_id, parcel, p, wells,
+    return PreparedSave(
+        parcel=parcel, params=p, wells=wells,
         # `generate` = the exact request recipe (minus the parcel, which reloads
         # from the stored AOI) so the client can restore an EDITABLE override
         # state on load — params, mode, and per-bench zones included.
         summary={"note": summary, "warehouse_notes": notes,
                  "category_overrides": req.category_overrides,
                  "generate": req.generate.model_dump(mode="json", exclude={"parcel"})},
-        name=req.name)
+        name=req.name, frame_azimuth_deg=None)
+
+
+@router.post("")
+def save(req: SaveScenarioRequest, conn: psycopg.Connection = Depends(get_conn)) -> dict:
+    ps = prepare_save(req, conn)
+    n = persist.save_scenario(
+        conn, req.deal_id, req.scenario_id, ps.parcel, ps.params, ps.wells,
+        summary=ps.summary, name=ps.name)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 
-@router.post("/curate")
-def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """Persist a curated Novi-inventory baseline (the kept-PUD/PDP/RES set) directly,
-    without a generate run. Re-derives the parcel's inventory server-side and keeps
-    the wells whose bench is selected and whose category is active."""
+def prepare_curate(
+    req: SaveCurateRequest, conn: psycopg.Connection
+) -> PreparedSave:
+    """Read-only compute half of the curate save (POST /scenarios/curate)."""
     parcel = parcel_from_geojson(req.parcel)
     cats = tuple(c for c in ("pdp", "pud", "res") if c in req.categories)
     wells, frame_az = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
@@ -191,22 +223,30 @@ def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_c
         scenario_id=req.scenario_id, deal_id=req.deal_id, formation="", target_tvd_ft=0.0,
         well_type="single", objective="max_lateral", spacing_ft=0.0, setback_ft=0.0,
         azimuth_deg=None, min_lateral_ft=0.0)
-    n = persist.save_scenario(
-        conn, req.deal_id, req.scenario_id, parcel, p, wells,
+    return PreparedSave(
+        parcel=parcel, params=p, wells=wells,
         summary={"mode": "curate", "kept_benches": req.kept_benches,
                  "categories": list(cats), "culled_wells": req.culled_wells,
-                 "category_overrides": req.category_overrides}, name=req.name,
-        frame_azimuth_deg=frame_az)
+                 "category_overrides": req.category_overrides},
+        name=req.name, frame_azimuth_deg=frame_az)
+
+
+@router.post("/curate")
+def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_conn)) -> dict:
+    """Persist a curated Novi-inventory baseline (the kept-PUD/PDP/RES set) directly,
+    without a generate run. Re-derives the parcel's inventory server-side and keeps
+    the wells whose bench is selected and whose category is active."""
+    ps = prepare_curate(req, conn)
+    n = persist.save_scenario(
+        conn, req.deal_id, req.scenario_id, ps.parcel, ps.params, ps.wells,
+        summary=ps.summary, name=ps.name, frame_azimuth_deg=ps.frame_azimuth_deg)
     return {"saved_wells": n, "deal_id": req.deal_id, "scenario_id": req.scenario_id}
 
 
-@router.post("/composed")
-def save_composed(
-    req: SaveComposedRequest, conn: psycopg.Connection = Depends(get_conn)
-) -> dict:
-    """Persist a composed plan: kept Novi inventory (benches sourced 'novi') plus
-    server-side generated wells (benches sourced 'generate') as ONE scenario.
-    Culls bake out. The full recipe rides summary so loads restore editable."""
+def prepare_composed(
+    req: SaveComposedRequest, conn: psycopg.Connection
+) -> PreparedSave:
+    """Read-only compute half of the composed save (POST /scenarios/composed)."""
     parcel = parcel_from_geojson(req.parcel)
     novi_benches = {f for f, s in req.bench_sources.items() if s == "novi"}
     gen_zones = [z for z in req.zones if req.bench_sources.get(z.formation) == "generate"]
@@ -268,8 +308,8 @@ def save_composed(
             spacing_ft=0.0, setback_ft=0.0, azimuth_deg=None, min_lateral_ft=0.0)
     else:
         p = replace(p, deal_id=req.deal_id, scenario_id=req.scenario_id)
-    n = persist.save_scenario(
-        conn, req.deal_id, req.scenario_id, parcel, p, wells,
+    return PreparedSave(
+        parcel=parcel, params=p, wells=wells,
         summary={
             "mode": "composed", "bench_sources": req.bench_sources,
             "categories": list(req.categories), "culled_wells": req.culled_wells,
@@ -286,6 +326,19 @@ def save_composed(
             **({"deal_terms": req.deal_terms} if req.deal_terms else {}),
         },
         name=req.name, frame_azimuth_deg=frame_az)
+
+
+@router.post("/composed")
+def save_composed(
+    req: SaveComposedRequest, conn: psycopg.Connection = Depends(get_conn)
+) -> dict:
+    """Persist a composed plan: kept Novi inventory (benches sourced 'novi') plus
+    server-side generated wells (benches sourced 'generate') as ONE scenario.
+    Culls bake out. The full recipe rides summary so loads restore editable."""
+    ps = prepare_composed(req, conn)
+    n = persist.save_scenario(
+        conn, req.deal_id, req.scenario_id, ps.parcel, ps.params, ps.wells,
+        summary=ps.summary, name=ps.name, frame_azimuth_deg=ps.frame_azimuth_deg)
     # NAME is the user-facing identity within a deal: saving under an existing
     # name REPLACES whatever row held it, even across id schemes (a legacy
     # curate_*/single_* row being upgraded by a re-save would otherwise linger
