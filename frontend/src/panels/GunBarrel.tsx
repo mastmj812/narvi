@@ -152,8 +152,21 @@ export function GunBarrel() {
   };
 
   const W = size.width, H = size.height;
+  // Auto-orientation (suite-wide gunbarrel convention): a ~N-S DSU reads
+  // W → E left-to-right, a ~E-W DSU reads N → S. +offset points 90°
+  // clockwise of the folded azimuth (canonical cross_axis) — WEST-ish once
+  // the folded azimuth passes 135° — so those mirror by default. The ⇋
+  // toggle flips on top of the auto default; persisted offsets untouched.
+  const az = gb.azimuth_deg;
+  let autoFlip = false;
+  if (az != null) {
+    const a = (((az % 180) + 180) % 180) * (Math.PI / 180);
+    const east = Math.cos(a), south = Math.sin(a);
+    autoFlip = Math.abs(east) >= Math.abs(south) ? east < 0 : south < 0;
+  }
+  const effFlip = autoFlip !== gbFlip;
   // flip mirrors the x-axis (scale on the signed values so min/max track the flip)
-  const sgn = gbFlip ? -1 : 1;
+  const sgn = effFlip ? -1 : 1;
   const xs = gb.points.map((p) => sgn * p.offset_ft), ys = gb.points.map((p) => p.tvd_ft);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
@@ -161,14 +174,12 @@ export function GunBarrel() {
   const sx = (x: number) => M.l + (((sgn * x - minX) / spanX) * 0.9 + 0.05) * (W - M.l - M.r);
   const sy = (y: number) => M.t + (((y - minY) / spanY) * 0.9 + 0.05) * (H - M.t - M.b);
 
-  // compass direction of +offset: 90° clockwise of the folded azimuth (the
-  // canonical cross_axis); the flip swaps which end is which.
+  // compass direction of each axis end; the effective flip swaps them.
   const WINDS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-  const az = gb.azimuth_deg;
   const plusDir = az != null ? WINDS[Math.round((((az % 180) + 90) % 360) / 45) % 8] : null;
   const minusDir = az != null ? WINDS[(Math.round((((az % 180) + 90) % 360) / 45) + 4) % 8] : null;
-  const rightLabel = gbFlip ? minusDir : plusDir;
-  const leftLabel = gbFlip ? plusDir : minusDir;
+  const rightLabel = effFlip ? minusDir : plusDir;
+  const leftLabel = effFlip ? plusDir : minusDir;
 
   // header counts reflect the PLAN (culled wells are already gone; PDP carry
   // context=true so they're reference, shown separately)
