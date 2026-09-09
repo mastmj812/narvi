@@ -138,38 +138,56 @@ def _longest_segment(geom: BaseGeometry) -> LineString | None:
     return None
 
 
+# The anchored flush row must be a FULL row, not "90% of one". t_mac_dsu_35_38_e2:
+# the two sections' west-line segments are laterally offset a few feet (a section-
+# corner jog), so the row-length profile L(y) jumps from half-length to full inside
+# a <0.5 ft band; the old >=90%-of-the-next-row plateau test bisected INTO that
+# band and stopped exactly where the row was 10% clipped — a stick sub-foot from
+# the setback line but 1,036 ft short of full. Land instead at the outermost y
+# whose row is within this tolerance of the best row in the one-spacing march
+# window: full-length by construction, still flush to inches on a straight line.
+_FLUSH_FULL_TOL_FT = 25.0
+
+
 def _flush_anchor_y(rot, minx, maxx, miny, maxy, edge_y, into, spacing_m, min_m) -> float:
-    """March inward from a W/E window edge to the first row flush against the FULL
-    boundary. When the edge runs ~parallel to the laterals, a constant-cross-section
-    row at the extreme corner grazes a single point (length ~0), so anchoring there
-    leaves the first real lateral a whole spacing inside the setback line. Step in
-    until the lateral reaches ~90% of the length one spacing further in (the start of
-    the full plateau) and anchor there, so the first leg sits ON the setback line."""
+    """March inward from a W/E window edge to the first FULL row. When the edge
+    runs ~parallel to the laterals, a constant-cross-section row at the extreme
+    corner grazes a single point (length ~0), so anchoring there leaves the first
+    real lateral a whole spacing inside the setback line. Anchor at the outermost
+    y whose row reaches within _FLUSH_FULL_TOL_FT of the longest row available in
+    the first spacing (so a jogged or gently tapering boundary yields a full-length
+    first leg ~ON the setback line, never a mid-ramp clipped one)."""
     def length_at(y: float) -> float:
         if not (miny - 1.0 <= y <= maxy + 1.0):
             return 0.0
         seg = _longest_segment(LineString([(minx - 10.0, y), (maxx + 10.0, y)]).intersection(rot))
         return seg.length if seg is not None else 0.0
 
-    def on_plateau(y: float) -> bool:
-        L = length_at(y)
-        return L >= min_m and L >= 0.9 * length_at(y + into * spacing_m)
-
     step = into * spacing_m / 40.0
-    for i in range(40):                       # coarse scan for the first full row
-        y = edge_y + i * step
-        if on_plateau(y):
+    ys = [edge_y + i * step for i in range(41)]
+    target = max(length_at(y) for y in ys)    # best row within one spacing of the edge
+    if target < min_m:
+        return edge_y                         # no real row there -> fall back to the edge
+    tol_m = _FLUSH_FULL_TOL_FT / FT_PER_M
+
+    def full(y: float) -> bool:
+        return length_at(y) >= target - tol_m
+
+    for i, y in enumerate(ys):                # coarse scan for the first full row
+        if full(y):
+            if i == 0:
+                return y                      # full on the edge itself
             # bisect the bracket [last-not-full, first-full] to land flush ON the
             # setback line (sub-foot), not on the coarse scan step inside it
-            lo, hi = edge_y + (i - 1) * step, y
+            lo, hi = ys[i - 1], y
             for _ in range(24):
                 mid = (lo + hi) / 2.0
-                if on_plateau(mid):
+                if full(mid):
                     hi = mid
                 else:
                     lo = mid
             return hi
-    return edge_y                             # nothing qualifies -> fall back to the edge
+    return edge_y                             # unreachable (target came from ys)
 
 
 def laterals_rotated(

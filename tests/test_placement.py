@@ -185,6 +185,42 @@ def test_west_anchor_first_lateral_flush_on_setback_line():
     assert abs(westmost - minx_e) * FT_PER_M < 5
 
 
+def test_west_anchor_full_row_on_jogged_section_line():
+    # Regression (t_mac_dsu_35_38_e2): a two-section DSU whose west line carries a
+    # section-corner jog — the two segments laterally offset a few feet with a
+    # hair of bearing difference — turns the row-length profile into a sub-foot-
+    # wide ramp from half-length to full. The old flush criterion (>= 90% of the
+    # row one spacing in) bisected INTO the ramp and anchored a stick exactly 10%
+    # short (9,325 of 10,361 ft) while sub-foot from the setback line. The flush
+    # anchor must land a FULL row, still ~on the constraining setback line.
+    from shapely.geometry import Polygon
+
+    from narvi.records import FT_PER_M
+
+    mile = 5280.0 / FT_PER_M
+    w = 2640.0 / FT_PER_M
+    jog = 2.0            # m (~6.6 ft) section-corner offset, east
+    tilt = 1.4           # m of extra easting over the north segment (~0.05 deg)
+    y_jog = 1.1 * mile   # south segment longer -> it defines the west-anchor bearing
+    parcel = Polygon([
+        (0.0, 0.0), (w, 0.0), (w, 2 * mile), (jog + tilt, 2 * mile),
+        (jog, y_jog), (0.0, y_jog), (0.0, 0.0)])
+    wells, _, _ = generate_scenario(parcel, _params(
+        azimuth_deg=None, anchor="west", spacing_ft=1200,
+        setback_ft=330, setback_ns_ft=100.0, setback_ew_ft=330.0,
+        min_lateral_ft=8000))
+    assert wells
+    lens = sorted(w_.completed_lateral_ft for w_ in wells)
+    assert lens[-1] - lens[0] < 50, \
+        f"anchored row clipped: {lens[0]:.0f} vs {lens[-1]:.0f} ft"
+    # and the anchored row still hangs ~on the constraining (north-segment)
+    # setback line — not a whole spacing inside the unit
+    west_x = min(min(leg.heel_xy[0], leg.toe_xy[0])
+                 for w_ in wells for leg in w_.legs)
+    inner_line = (jog + tilt) + 330.0 / FT_PER_M
+    assert west_x < inner_line + 3.0
+
+
 def test_wine_rack_stagger_and_interzone_offset():
     # West anchor preserves the alternating stagger (a center anchor now max-packs
     # each bench, which can converge them to the same cross-section instead).
