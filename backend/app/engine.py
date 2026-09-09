@@ -49,7 +49,10 @@ def run_generate(req: GenerateRequest):
         elif req.source_azimuth and p.azimuth_deg is None:
             az = section_azimuth(conn, parcel, req.buffer_ft)
             if az is not None:
-                p = replace(p, azimuth_deg=az)
+                # sourced = advisory: the auto anchor may refine an edge-hung
+                # candidate to its lease line's own bearing (edge snap). A
+                # user-typed override arrives without the flag and never snaps.
+                p = replace(p, azimuth_deg=az, azimuth_sourced=True)
                 sourced_az = az
                 notes.append(f"adopted offset-well grid azimuth {az:.1f} deg")
             else:

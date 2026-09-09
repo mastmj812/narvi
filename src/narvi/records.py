@@ -28,6 +28,12 @@ class ScenarioParams:
     # lateral azimuth (compass deg cw from N). None => auto from the parcel's
     # long axis (dominant_azimuth) as a stand-in for the RRC section grid.
     azimuth_deg: float | None = None
+    # True when azimuth_deg was ADOPTED (offset-well grid sourced from the
+    # warehouse) rather than typed by the user. An adopted bearing is advisory:
+    # the auto anchor may refine an edge-hung candidate to its lease line's own
+    # bearing (see generate._edge_snap_azimuth). A user override keeps False and
+    # is never second-guessed.
+    azimuth_sourced: bool = False
     well_type: str = "single"  # 'single' | 'uturn' (uturn pairs adjacent legs)
     # placement objective when azimuth is auto: 'max_lateral' (default) runs along
     # the parcel long axis for the longest laterals; 'max_count' sweeps azimuth +

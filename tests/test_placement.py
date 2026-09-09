@@ -374,6 +374,79 @@ def test_wine_rack_uturn_zones_stagger_not_stack():
     assert rep.min_interzone_offset_ft is not None and rep.min_interzone_offset_ft > 600
 
 
+def test_auto_anchor_snaps_sourced_azimuth_to_lease_line():
+    # Regression (hula_hoop_dsu_46): the sourced neighborhood-grid azimuth ran a
+    # fraction of a degree off the parcel's own west line, so the flush row touched
+    # the setback at one end and drifted ~25 ft off it at the other. A SOURCED
+    # bearing is advisory: auto's west/east candidates run at their lease line's
+    # own bearing and take a footage tie, so the winner is exactly line-parallel.
+    from shapely.affinity import rotate as _rot
+
+    from narvi.placement import anchor_edge_azimuth
+
+    parcel = _rot(synthetic_section(5280.0), 12.0, origin="centroid")
+    west_az = anchor_edge_azimuth(parcel, "west")
+    wells, _, feas = generate_scenario(parcel, _params(
+        azimuth_deg=west_az + 0.4, azimuth_sourced=True, anchor="auto",
+        setback_ft=200, min_lateral_ft=3000))
+    assert wells
+    assert abs(wells[0].lateral_azimuth_deg - round(west_az, 1)) < 0.1
+    assert "line)" in feas.note
+    for w in wells:
+        for leg in w.legs:
+            b = math.degrees(math.atan2(leg.toe_xy[0] - leg.heel_xy[0],
+                                        leg.toe_xy[1] - leg.heel_xy[1])) % 180.0
+            assert abs(b - west_az) < 0.05   # laterals parallel to the lease line
+
+
+def test_auto_anchor_never_snaps_a_stipulated_azimuth():
+    # A user-typed override (azimuth_sourced defaults False) is a decision of
+    # record — auto's edge candidates must run at the stipulated bearing.
+    from shapely.affinity import rotate as _rot
+
+    from narvi.placement import anchor_edge_azimuth
+
+    parcel = _rot(synthetic_section(5280.0), 12.0, origin="centroid")
+    az0 = anchor_edge_azimuth(parcel, "west") + 0.4
+    wells, _, feas = generate_scenario(parcel, _params(
+        azimuth_deg=az0, anchor="auto", setback_ft=200, min_lateral_ft=3000))
+    assert wells
+    assert all(abs(w.lateral_azimuth_deg - round(az0 % 180.0, 1)) < 0.05 for w in wells)
+    assert "line)" not in feas.note
+
+
+def test_edge_snap_gate_rejects_cross_grid_bearing():
+    # A sourced bearing tens of degrees off the lease line is a development
+    # direction, not drift (broTime: the edge was a dropout bearing) — no snap.
+    from shapely.affinity import rotate as _rot
+
+    parcel = _rot(synthetic_section(5280.0), 12.0, origin="centroid")
+    wells, _, feas = generate_scenario(parcel, _params(
+        azimuth_deg=42.0, azimuth_sourced=True, anchor="auto",
+        setback_ft=200, min_lateral_ft=3000))
+    assert wells
+    assert all(abs(w.lateral_azimuth_deg - 42.0) < 0.05 for w in wells)
+    assert "line)" not in feas.note
+
+
+def test_wine_rack_deal_azimuth_snaps_to_lease_line_when_sourced():
+    # The deal resolves the bearing ONCE: when the anchor competition's winner is
+    # an edge-hung candidate under a sourced azimuth, every zone shares the lease
+    # line's bearing (a dropout edge would lose the footage competition instead).
+    from shapely.affinity import rotate as _rot
+
+    from narvi.placement import anchor_edge_azimuth
+
+    parcel = _rot(synthetic_section(5280.0), 12.0, origin="centroid")
+    west_az = anchor_edge_azimuth(parcel, "west")
+    base = _params(azimuth_deg=west_az + 0.4, azimuth_sourced=True, anchor="auto",
+                   setback_ft=200, min_lateral_ft=3000)
+    zones = [Zone("WCA_1", 11500), Zone("WCA_2", 11700)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+    assert wells and len(rep.zones) == 2
+    assert all(abs(w.lateral_azimuth_deg - round(west_az, 1)) < 0.1 for w in wells)
+
+
 def test_wine_rack_slack_shift_avoids_boundary_clipped_stick():
     # Regression (Castaway S2 sec 35, the real tract): a survey tract a few
     # degrees off the lateral bearing clips the far boundary row short — the
