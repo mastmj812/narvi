@@ -512,7 +512,9 @@ export function PlanPanel() {
           <div className="field">
             <label title={"where the row pattern hangs across the unit. West/east LINE anchors derive "
               + "the azimuth from that lease line, so they're disabled while an azimuth override is set "
-              + "(auto still tries edge-hung patterns at the overridden bearing)."}>anchor</label>
+              + "(auto still tries edge-hung patterns at the overridden bearing). With an auto/sourced "
+              + "azimuth, auto's edge-hung candidates also align to their lease line, so the flush row "
+              + "runs parallel to the setback; a typed override is never re-derived."}>anchor</label>
             <select value={params.anchor} onChange={(e) => setParam("anchor", e.target.value as Params["anchor"])}>
               <option value="auto">auto (max footage)</option>
               <option value="west" disabled={params.azimuth_deg != null}>west line</option>

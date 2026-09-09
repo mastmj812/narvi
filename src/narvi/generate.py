@@ -283,6 +283,56 @@ def _place_for_anchor(window, az, p, row_offset_ft, anchor, uturn, spacing_m, gb
     return wells, _dropped_short(window, az, p, row_offset_ft, anchor)
 
 
+# Auto-anchor edge snap: an edge-hung ('west'/'east') candidate under an ADVISORY
+# bearing — auto, or sourced from the warehouse grid (azimuth_sourced) — is
+# evaluated at its lease line's OWN bearing, so the flush row runs parallel to the
+# setback instead of drifting off it by the grid-vs-survey disagreement
+# (hula_hoop: 162.3° neighborhood grid vs the parcel's west line = ~25 ft of gap
+# at the far end of a 4,700 ft leg). Gated tight: an edge bearing further off the
+# resolved azimuth than this is a different development direction, not drift
+# (broTime: the ~161.1° edge was a dropout bearing) — such candidates keep the
+# resolved azimuth and compete exactly as before. A user-stipulated azimuth is
+# never snapped.
+_EDGE_SNAP_MAX_DELTA_DEG = 5.0
+# below this the snap is a no-op (edge == grid); keep it unsnapped so the
+# center-on-a-tie rule still holds on grid-conforming units
+_EDGE_SNAP_MIN_DELTA_DEG = 0.05
+# A snapped candidate takes a "tie" within this footage fraction: rows run
+# obliquely across a window gain secant length (<= 1 - cos(5 deg) ~ 0.4% at the
+# gate), which is survey noise, not drillable advantage. Real candidate
+# differences — a row or leg gained/lost — are >= a min-lateral, far above 0.5%,
+# so a dropout edge bearing (broTime) still loses the competition outright.
+_EDGE_SNAP_TIE_FRAC = 0.005
+
+
+def _snap_tie(ft: float, best_ft: float) -> bool:
+    """True when `ft` is within the snap tie window of the standing best."""
+    return ft > best_ft - max(1.0, _EDGE_SNAP_TIE_FRAC * best_ft)
+
+
+def _axial_delta_deg(a: float, b: float) -> float:
+    """Angular distance between two axial bearings, folded to [0, 90]."""
+    d = abs(a - b) % 180.0
+    return min(d, 180.0 - d)
+
+
+def _edge_snap_azimuth(parcel: BaseGeometry, anchor: str, az: float,
+                       p: ScenarioParams) -> float | None:
+    """Bearing to evaluate an auto-resolved 'west'/'east' candidate at, or None
+    to keep the resolved azimuth. Snaps only an advisory bearing (azimuth_deg
+    None, or warehouse-sourced) within the drift gate of the lease-line edge."""
+    if p.azimuth_deg is not None and not p.azimuth_sourced:
+        return None                             # user override: never second-guessed
+    edge_az = anchor_edge_azimuth(parcel, anchor)
+    if edge_az is None:
+        return None
+    edge_az %= 180.0
+    if not (_EDGE_SNAP_MIN_DELTA_DEG <= _axial_delta_deg(edge_az, az)
+            <= _EDGE_SNAP_MAX_DELTA_DEG):
+        return None
+    return edge_az
+
+
 def _deal_anchor(window, az, p, uturn, spacing_m, gb) -> str:
     """Pick where the rows hang for the whole deal: the anchor that drills the most
     completed footage (center on a tie, so a regular unit stays centered)."""
@@ -295,7 +345,8 @@ def _deal_anchor(window, az, p, uturn, spacing_m, gb) -> str:
     return best_a
 
 
-def _deal_anchor_zones(window, az, base, zs, z_spacings, gb) -> str:
+def _deal_anchor_zones(parcel, window, az, base, zs, z_spacings, gb
+                       ) -> tuple[str, float, tuple]:
     """Wine-rack deal anchor: evaluate each anchor on the ZONES AS THEY WILL PLACE
     — each zone's own spacing, U-turn eligibility, and stagger phase — and keep the
     anchor drilling the most total footage (center on a tie). Evaluating only the
@@ -303,20 +354,35 @@ def _deal_anchor_zones(window, az, base, zs, z_spacings, gb) -> str:
     phase can need the slack an edge anchor provides: on a tight cross-window the
     centered phase-0 row plateaus at one leg while a lease-line anchor fits a full
     staggered U-turn in EVERY zone (Castaway half-sections, 1,200 ft leg-to-leg in
-    a 1,980 ft window)."""
-    best_a, best_ft = "center", -1.0
-    for a in ("center", "west", "east"):
+    a 1,980 ft window).
+
+    West/east candidates under an advisory bearing run at their lease line's own
+    bearing (edge snap) and take a footage TIE against an unsnapped candidate;
+    returns (anchor, azimuth, gb) so the deal locks the winner's bearing ONCE for
+    every zone. The competition itself is the broTime guard: an edge bearing that
+    drops wells scores less footage and loses to center at the resolved azimuth."""
+    cands: list[tuple[str, float, tuple, bool]] = [("center", az, gb, False)]
+    for a in ("west", "east"):
+        e_az = _edge_snap_azimuth(parcel, a, az, base)
+        cands.append((a, e_az, (e_az, gb[1]), True) if e_az is not None
+                     else (a, az, gb, False))
+    best = cands[0]
+    best_ft, best_snap = -1.0, False
+    for a, az_a, gb_a, snap in cands:
         ft = 0.0
         for i, (z, sp) in enumerate(zip(zs, z_spacings)):
             off = (i % 2) * (sp / 2.0)                  # the placement loop's stagger
             u = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
             p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
                           spacing_ft=sp)
-            ws, _ = _place_for_anchor(window, az, p_i, off, a, u, sp / FT_PER_M, gb)
+            ws, _ = _place_for_anchor(window, az_a, p_i, off, a, u, sp / FT_PER_M, gb_a)
             ft += sum(w.completed_lateral_ft for w in ws)
-        if ft > best_ft + 1.0:                          # center first -> wins ties
-            best_a, best_ft = a, ft
-    return best_a
+        better = ft > best_ft + 1.0                     # center first -> wins ties
+        if not better and snap and not best_snap and _snap_tie(ft, best_ft):
+            better = True                               # snapped takes the tie
+        if better:
+            best, best_ft, best_snap = (a, az_a, gb_a, snap), ft, snap
+    return best[0], best[1], best[2]
 
 
 def _count_legs(window: BaseGeometry, az: float, p: ScenarioParams, offset: float,
@@ -377,10 +443,11 @@ def generate_scenario(
     ew = p.setback_ew_ft if p.setback_ew_ft is not None else p.setback_ft
     setback_str = f"{ns:.0f}" if abs(ns - ew) < 1e-6 else f"{ns:.0f} NS/{ew:.0f} EW"
     window = drillable_window(parcel, ns, ew)
-    # force_azimuth locks the bearing (the wine-rack resolves it ONCE for the deal):
-    # an internally auto-resolved 'west'/'east' anchor then only hangs the rows, it
-    # does NOT re-derive the azimuth from the lease-line edge (that override is only
-    # for a USER-stipulated W/E anchor, which comes through _resolve_azimuth here).
+    # force_azimuth locks the bearing (the wine-rack resolves it ONCE for the deal,
+    # edge snap included, in _deal_anchor_zones): zones never re-snap here. In a
+    # single generate, a USER-stipulated W/E anchor defines the azimuth outright
+    # (_resolve_azimuth), and auto's internal 'west'/'east' candidates are evaluated
+    # at their lease line's own bearing when the azimuth is advisory (edge snap).
     az = (force_azimuth if force_azimuth is not None
           else _resolve_azimuth(parcel, window, p)) % 180.0   # axial: fold once
     auto = p.azimuth_deg is None
@@ -406,7 +473,17 @@ def generate_scenario(
     wells: list[InventoryWell] = []
     dropped = 0
     best_ft = None
+    az_used: float = az
+    snap_used: str | None = None      # 'west'/'east' when the winner is edge-snapped
     for a in anchors:
+        # edge snap: an auto west/east candidate under an advisory bearing runs at
+        # its lease line's own bearing (a wine-rack locks the deal bearing once via
+        # force_azimuth, so zones never re-snap here).
+        az_a, gb_a, snap_a = az, gb, None
+        if a in ("west", "east") and p.anchor == "auto" and force_azimuth is None:
+            e_az = _edge_snap_azimuth(parcel, a, az, p)
+            if e_az is not None:
+                az_a, gb_a, snap_a = e_az, (e_az, gb[1]), a
         # 'center' tries both row phases (a row on the midline vs straddling it) and
         # keeps the one that packs more — anchoring a row exactly on the midline can
         # fit one fewer than the equally-centered half-shift (3 vs 4 at 1,200 ft).
@@ -416,20 +493,29 @@ def generate_scenario(
         offs = ((row_offset_ft, row_offset_ft + half)
                 if a == "center" and optimize_phase else (row_offset_ft,))
         cand, cand_dropped = max(
-            (_place_for_anchor(window, az, p, o, a, uturn, spacing_m, gb) for o in offs),
+            (_place_for_anchor(window, az_a, p, o, a, uturn, spacing_m, gb_a) for o in offs),
             key=lambda r: round(sum(w.completed_lateral_ft for w in r[0]), 1))
         ft = sum(w.completed_lateral_ft for w in cand)
         # first candidate always lands (so a fully-filtered run still carries its
-        # dropped count); after that only strictly better -> center wins ties
-        if best_ft is None or ft > best_ft + 1.0:
+        # dropped count); after that only strictly better -> center wins ties —
+        # EXCEPT that a snapped candidate also takes a tie (drift-secant noise
+        # window) against an unsnapped one: same drillable footage, but flush on
+        # and parallel to the setback line instead of drifting off it.
+        better = best_ft is None or ft > best_ft + 1.0
+        if not better and snap_a and not snap_used and _snap_tie(ft, best_ft):
+            better = True
+        if better:
             wells, dropped, best_ft = cand, cand_dropped, ft
+            az_used, snap_used = az_a, snap_a
 
     for w in wells:
-        w.lateral_azimuth_deg = round(az, 1)
+        w.lateral_azimuth_deg = round(az_used, 1)
     n_legs = sum(len(w.legs) for w in wells)
+    az_tag = (f" ({'auto, ' if auto else ''}{snap_used} line)" if snap_used
+              else (" (auto)" if auto else ""))
     note = (f"{len(wells)} {'uturn' if uturn else 'single'} wells / {n_legs} legs of "
             f"{p.formation} at {p.spacing_ft:.0f} ft spacing / {setback_str} ft setback / "
-            f"{az:.1f}° azimuth{' (auto)' if auto else ''}"
+            f"{az_used:.1f}° azimuth{az_tag}"
             + (f"  [U-turn leg-to-leg {p.spacing_ft:.0f} < {p.uturn_min_leg_to_leg_ft:.0f} ft "
                f"floor -> singles]" if floored else "")
             + (f"  [{dropped} short {'well' if uturn else 'lateral'}{'s' if dropped != 1 else ''} "
@@ -438,7 +524,7 @@ def generate_scenario(
         # a bare zero reads as a generator failure — say what the geometry holds
         # and which bearing would work (lazy import: feasibility uses this module)
         from .feasibility import zero_well_hint
-        note += zero_well_hint(parcel, p, az)
+        note += zero_well_hint(parcel, p, az_used)
     feas = Feasibility(
         requested=None, placed=len(wells), legs=n_legs, dropped=dropped,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in wells), 1),
@@ -483,7 +569,10 @@ def generate_wine_rack(
     # judged on the zones as they will actually place (spacing + stagger phase).
     anchor_stipulated = base.anchor != "auto"
     if base.anchor == "auto":
-        base = replace(base, anchor=_deal_anchor_zones(window0, az, base, zs, z_spacings, gb))
+        # the anchor competition may also snap the deal bearing to the winning
+        # lease line (advisory azimuth only) — az/gb are the deal's from here on
+        a, az, gb = _deal_anchor_zones(parcel, window0, az, base, zs, z_spacings, gb)
+        base = replace(base, anchor=a)
     # Fix ONE turn end for the deal so zones don't mix north/south turns (one surface
     # side); auto-pick the higher-footage side, evaluated at the chosen anchor.
     # 'north'/'south' -> each zone resolves the same end from drill_from + the az.

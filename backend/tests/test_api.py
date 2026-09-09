@@ -193,6 +193,34 @@ def test_sourced_grid_azimuth_zero_wells_falls_back_to_long_axis(monkeypatch):
     assert not any("CROSS-GRID" in n for n in d2["warehouse_notes"])
 
 
+def test_sourced_grid_azimuth_snaps_to_lease_line(monkeypatch):
+    # hula_hoop regression, end-to-end: a SOURCED bearing a fraction of a degree
+    # off the parcel's west line left the flush row drifting off the 330 ft
+    # setback. Sourcing marks the bearing advisory (azimuth_sourced) so the auto
+    # anchor's edge-hung winner aligns to the lease line's own bearing.
+    from shapely.affinity import rotate as _rot
+
+    from app import engine as eng
+    from narvi.parcel import parcel_from_geojson
+    from narvi.placement import anchor_edge_azimuth
+
+    tilted = mapping(_to_wgs_geom(_rot(synthetic_section(5280.0), 12.0, origin="centroid")))
+    west_az = anchor_edge_azimuth(parcel_from_geojson(tilted), "west")
+    monkeypatch.setattr(eng, "get_connection", lambda: None)
+    monkeypatch.setattr(eng, "section_azimuth", lambda conn, parcel, buf: west_az + 0.4)
+    r = client.post("/api/generate", json={
+        "parcel": tilted,
+        "params": {"spacing_ft": 880, "setback_ft": 200, "formation": "WCA_2",
+                   "target_tvd_ft": 11663, "min_lateral_ft": 3000},
+        "mode": "single",
+        "source_azimuth": True,
+    })
+    assert r.status_code == 200
+    d = r.json()
+    assert d["placed_wells"] > 0
+    assert abs(d["azimuth_deg"] - round(west_az, 1)) < 0.1   # lease line, not grid
+
+
 def test_classify_for_handoff_overrides():
     """Override application: planned wells flip PUD/UPSIDE; PDP wells and
     unknown names are a 400 (never silently dropped)."""
