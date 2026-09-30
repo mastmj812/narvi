@@ -213,8 +213,13 @@ def landing_tvd_stats(
     formation: str,
     buffer_ft: float = 5280.0,
 ) -> LandingTvdStats:
-    """Median landing TVD for one `formation_blueox` from horizontal offset
-    wells whose lateral stick lies within `buffer_ft` of the AOI.
+    """Median landing TVD for one `formation_blueox` from PRODUCING horizontal
+    offset wells whose lateral stick lies within `buffer_ft` of the AOI.
+
+    Producers only (first_production_date set, the same predicate as the PDP
+    inventory): permits, cancelled permits and DUCs carry planned — often
+    round-100 — depths, not landings. A cancelled-permit program once set a
+    unit's WCC median to 13,000 ft on 22 permits vs 1 producer at 12,653.
 
     The parcel is a work-CRS (UTM 13N) geometry from the geometry core; it's
     projected to 4326 here. Default buffer is one mile — wide enough to catch
@@ -230,6 +235,7 @@ def landing_tvd_stats(
               AND w.formation_blueox = %(formation)s
               AND w.tvd_ft IS NOT NULL
               AND w.tvd_ft > 0
+              AND w.first_production_date IS NOT NULL
               AND w.wellstick_geom IS NOT NULL
               AND ST_DWithin(
                     w.wellstick_geom::geography,
@@ -535,6 +541,7 @@ def available_benches(
             FROM curated.wells_enriched
             WHERE is_horizontal AND formation_blueox IS NOT NULL
               AND tvd_ft IS NOT NULL AND wellstick_geom IS NOT NULL
+              AND first_production_date IS NOT NULL   -- no permits/DUCs
               AND ST_DWithin(wellstick_geom::geography,
                              ST_GeogFromText(%(aoi)s), %(buf)s)
             GROUP BY 1
