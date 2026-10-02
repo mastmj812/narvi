@@ -113,7 +113,7 @@ def test_tvd_tier_precedence():
     assert by["BS1_S"].median_tvd_ft == 10100.0 and by["BS1_S"].tvd_local is False
     assert "producers, out to 5.6 mi" in by["BS1_S"].tvd_basis
     # no producers within the far radius -> nearest Novi sticks
-    assert by["WCD"].median_tvd_ft == 13000.0 and "Novi sticks" in by["WCD"].tvd_basis
+    assert by["WCD"].median_tvd_ft == 13000.0 and by["WCD"].tvd_basis == "nearest 1 Novi stick, out to 7.5 mi"
     # widened tiers are only asked about benches still missing
     far_asks = dict(cur.asked)
     assert "BS2_C" not in far_asks["far_producers"] and "AVA_0" not in far_asks["far_producers"]

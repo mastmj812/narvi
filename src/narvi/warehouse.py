@@ -529,6 +529,10 @@ def apply_depth_window(
             b.note = f"{b.note}; {reason}" if b.note else reason
 
 
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
 def _strat_sort_key(b: BenchInfo) -> tuple[float, float]:
     """Column order first; off-column codes after, by TVD."""
     return (b.strat_rank if b.strat_rank is not None else 1e9,
@@ -669,7 +673,7 @@ def available_benches(
             if med_tvd is not None:                    # producer TVD supersedes Novi
                 b.median_tvd_ft = med_tvd
                 thin = " (thin)" if n < _TVD_LOCAL_MIN_WELLS else ""
-                b.tvd_basis = f"{n} producers within {ring_mi:g} mi{thin}"
+                b.tvd_basis = f"{_plural(n, 'producer')} within {ring_mi:g} mi{thin}"
                 b.tvd_local = True
 
         # No producer in the ring: Novi stick TVDs in the ring (same precedence as
@@ -677,9 +681,9 @@ def available_benches(
         # ring, i.e. rows that exist because the column is always listed — the
         # nearest producers out to _TVD_FAR_M, then the nearest Novi sticks.
         tiers = (
-            (_NEAREST_STICK_TVD_SQL, buf_m, 100_000, "Novi sticks", True),
-            (_NEAREST_PRODUCER_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "producers", False),
-            (_NEAREST_STICK_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "Novi sticks", False),
+            (_NEAREST_STICK_TVD_SQL, buf_m, 100_000, "Novi stick", True),
+            (_NEAREST_PRODUCER_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "producer", False),
+            (_NEAREST_STICK_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "Novi stick", False),
         )
         for sql, reach_m, n_max, label, local in tiers:
             missing = [fb for fb, b in benches.items() if b.median_tvd_ft is None]
@@ -694,10 +698,10 @@ def available_benches(
                 b.median_tvd_ft = _median([t for t, _ in pts])
                 b.tvd_local = local
                 if local:
-                    b.tvd_basis = f"{len(pts)} {label} within {ring_mi:g} mi"
+                    b.tvd_basis = f"{_plural(len(pts), label)} within {ring_mi:g} mi"
                 else:
                     reach_mi = max(d for _, d in pts) * FT_PER_M / 5280.0
-                    b.tvd_basis = f"nearest {len(pts)} {label}, out to {reach_mi:.1f} mi"
+                    b.tvd_basis = f"nearest {_plural(len(pts), label)}, out to {reach_mi:.1f} mi"
 
         # de-facto per-bench spacing: project same-bench stick centroids onto the
         # cross-section axis (perpendicular to the grid azimuth) and take the
