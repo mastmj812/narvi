@@ -120,6 +120,9 @@ class BenchInfoModel(BaseModel):
     note: str
     n_supported: int | None = None   # pud/res sticks with offset support (sql/30); null in dev menu
     depth_allowed: bool | None = None  # False = outside the deal depth window (soft flag)
+    strat_rank: int | None = None      # position in the basin's strat column (0 = shallowest)
+    tvd_basis: str | None = None       # provenance of median_tvd_ft (offset tier)
+    tvd_local: bool | None = None      # False = estimate reached past the ring / Novi TVDs
 
 
 class InventoryResponse(BaseModel):

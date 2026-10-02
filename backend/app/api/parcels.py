@@ -61,9 +61,9 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     apply_handoff_support(None, wells)
     unit_wells = [w for w in wells if not w.context]
     benches = bench_summary(unit_wells)                     # overlap inventory -> curate
-    # Override designs NEW development, so its menu is the AREA's developable benches
-    # (producing TVD control within a buffer), not just what physically overlaps the
-    # unit — e.g. WCA with plenty of nearby PDP but no well crossing this parcel.
+    # Generation menu = the basin's FULL strat column (generate exists for benches
+    # Novi didn't stick); the 1-mi ring only supplies counts/spacing, and the TVD
+    # estimate widens to the nearest offsets when the ring is thin.
     dev = available_benches(conn, parcel, buffer_ft=5280.0)
     # Deal depth window (engineer-entered, ft TVD): flag out-of-window benches in
     # BOTH menus. Soft — flagged benches stay selectable; the UI seeds them off.
@@ -75,7 +75,8 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
         return BenchInfoModel(
             formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
             n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
-            note=b.note, n_supported=b.n_supported, depth_allowed=b.depth_allowed)
+            note=b.note, n_supported=b.n_supported, depth_allowed=b.depth_allowed,
+            strat_rank=b.strat_rank, tvd_basis=b.tvd_basis, tvd_local=b.tvd_local)
 
     return InventoryResponse(
         well_count=len(unit_wells),

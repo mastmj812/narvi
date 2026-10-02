@@ -451,6 +451,51 @@ class BenchInfo:
     # off seeding only, never a removal); None = no window supplied. Appended
     # after n_supported per the same positional-construction rule.
     depth_allowed: bool | None = None
+    # position in the basin's stratigraphic column (0 = shallowest; STRAT_COLUMN).
+    # None = not a column code (OTHER, unit-only oddities) -> sorts after.
+    strat_rank: int | None = None
+    # where median_tvd_ft came from (available_benches tiers). tvd_local=False
+    # means the estimate reached beyond the 1-mi ring or fell back to Novi
+    # stick TVDs — usable, but say so.
+    tvd_basis: str | None = None
+    tvd_local: bool | None = None
+
+
+# Stratigraphic columns, shallow -> deep, in formation_blueox codes. The bench
+# menu always lists the WHOLE column for the parcel's basin — the generator's
+# job is placing sticks Novi didn't (a bench with no Novi inventory nearby is
+# exactly when you need it), so local evidence must not decide which benches
+# exist. Mirrors anduin frontend/src/map/formations.ts BASIN_CODES (OTHER
+# dropped: not a bench) — change both or neither.
+STRAT_COLUMN: dict[str, list[str]] = {
+    "delaware": [
+        "AVA_0", "AVA_1", "AVA_2",
+        "BS1_S", "BS2_C", "BS2_S", "BS3_C", "BS3_S",
+        "WCXY", "WCA_1", "WCA_2", "WCB_1", "WCB_2", "WCC", "WCD",
+        "STRN", "BRNT", "MISS", "WDFD",
+    ],
+    "midland": [
+        "US", "MS", "JM", "LSSH", "DEAN",
+        "WCA_1", "WCB_1", "WCB_2", "WCC", "WCD",
+        "STRN", "BRNT", "MRMC", "MISS", "WDFD",
+    ],
+    "cbp": [
+        "MS", "LSSH", "DEAN",
+        "BS1_S", "BS2_C", "BS2_S",
+        "WCB_1", "WCB_2",
+        "STRN", "MISS", "BRNT", "WDFD",
+    ],
+}
+DEFAULT_BASIN = "delaware"          # narvi is Delaware-first; used when no wells nearby
+
+# Bench TVD estimate tiers (available_benches). Fewer than this many ring
+# producers is labelled thin (still used — same precedence as before). Benches
+# with nothing in the ring take the nearest N producers within the far radius,
+# then the nearest N Novi PUD/RES sticks (TVDs can be placeholders).
+_TVD_LOCAL_MIN_WELLS = 3
+_TVD_NEAREST_N = 10
+_TVD_FAR_M = 16093.0                # 10 mi
+_BASIN_LOOKUP_M = 8047.0            # 5 mi, modal basin_blueox of nearby wells
 
 
 def apply_depth_window(
@@ -484,31 +529,103 @@ def apply_depth_window(
             b.note = f"{b.note}; {reason}" if b.note else reason
 
 
+def _strat_sort_key(b: BenchInfo) -> tuple[float, float]:
+    """Column order first; off-column codes after, by TVD."""
+    return (b.strat_rank if b.strat_rank is not None else 1e9,
+            b.median_tvd_ft if b.median_tvd_ft is not None else 1e9)
+
+
+# Nearest-offset TVD tiers for available_benches: up to %(n)s offsets per bench
+# within %(far)s metres, nearest first (distance to the parcel; 0 inside it).
+_NEAREST_PRODUCER_TVD_SQL = """
+    SELECT fb, tvd, d FROM (
+        SELECT formation_blueox AS fb, tvd_ft AS tvd,
+               ST_Distance(wellstick_geom::geography, ST_GeogFromText(%(aoi)s)) AS d,
+               row_number() OVER (
+                   PARTITION BY formation_blueox
+                   ORDER BY ST_Distance(wellstick_geom::geography,
+                                        ST_GeogFromText(%(aoi)s))) AS rn
+        FROM curated.wells_enriched
+        WHERE is_horizontal AND formation_blueox = ANY(%(codes)s)
+          AND tvd_ft IS NOT NULL AND wellstick_geom IS NOT NULL
+          AND first_production_date IS NOT NULL   -- no permits/DUCs
+          AND ST_DWithin(wellstick_geom::geography,
+                         ST_GeogFromText(%(aoi)s), %(far)s)
+    ) s WHERE rn <= %(n)s
+"""
+
+_NEAREST_STICK_TVD_SQL = """
+    SELECT fb, tvd, d FROM (
+        SELECT ifb.formation_blueox AS fb, il.tvd AS tvd,
+               ST_Distance(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s)) AS d,
+               row_number() OVER (
+                   PARTITION BY ifb.formation_blueox
+                   ORDER BY ST_Distance(il.wellstick_geom::geography,
+                                        ST_GeogFromText(%(aoi)s))) AS rn
+        FROM curated.intel_locations il
+        JOIN curated.intel_formation_blueox ifb USING (stick_id)
+        LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
+        WHERE il.category IN ('PUD', 'RES') AND il.tvd IS NOT NULL
+          AND il.wellstick_geom IS NOT NULL
+          AND ifb.formation_blueox = ANY(%(codes)s)
+          AND ST_DWithin(il.wellstick_geom::geography,
+                         ST_GeogFromText(%(aoi)s), %(far)s)
+          AND (il.category = 'RES' OR ri.status IS NULL
+               OR ri.status IN ('remaining_pud', 'conflict'))
+    ) s WHERE rn <= %(n)s
+"""
+
+
 def available_benches(
     conn: psycopg.Connection,
     parcel: BaseGeometry,
     buffer_ft: float = 1320.0,
 ) -> list[BenchInfo]:
-    """Benches present in/around a parcel — the same evidence erebor shows for a
-    unit: Novi intel PUD/RES sticks (via curated.intel_formation_blueox) plus PDP
-    producers (curated.wells_enriched), keyed on formation_blueox. Each bench
-    carries its median landing TVD and a suggested per-bench spacing derived from
-    the de-facto nearest-neighbor distance between same-bench laterals (Bone Spring
-    develops wider than Wolfcamp), so the wine-rack defaults match how the rock is
-    actually developed. Buffer (default 1320 ft = ~1 spacing) catches immediate
-    offsets just outside the unit."""
+    """The parcel basin's FULL stratigraphic column (STRAT_COLUMN), in column
+    order, with local evidence attached — never a list filtered by evidence.
+    The generator exists to place sticks Novi didn't, so a bench with no Novi
+    inventory or producers in the ring still gets a row.
+
+    Evidence within `buffer_ft` (Novi PUD/RES sticks via curated.intel_
+    formation_blueox, producers via curated.wells_enriched) supplies the counts
+    and the suggested per-bench spacing (de-facto same-bench row gap — Bone
+    Spring develops wider than Wolfcamp). Median landing TVD, first hit wins:
+    producers in the ring; Novi PUD/RES stick TVDs in the ring; the nearest
+    _TVD_NEAREST_N producers within _TVD_FAR_M; the nearest Novi sticks there;
+    else None (the engineer enters it). `tvd_basis` says which; tvd_local=False
+    marks the two widened tiers.
+    Codes outside the column that do show up in the ring (OTHER, ...) are kept
+    with strat_rank None."""
     aoi = parcel_to_ewkt_4326(parcel)
     buf_m = buffer_ft / FT_PER_M
-    benches: dict[str, BenchInfo] = {}
+    ring_mi = buffer_ft / 5280.0
 
     with conn.cursor() as cur:
+        # basin = modal basin_blueox of wells around the parcel (coarse; 5 mi)
+        cur.execute(
+            """
+            SELECT basin_blueox FROM curated.wells_enriched
+            WHERE basin_blueox IS NOT NULL AND wellstick_geom IS NOT NULL
+              AND ST_DWithin(wellstick_geom::geography,
+                             ST_GeogFromText(%(aoi)s), %(far)s)
+            GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1
+            """,
+            {"aoi": aoi, "far": _BASIN_LOOKUP_M},
+        )
+        modal = cur.fetchall()
+        basin = modal[0][0] if modal and modal[0][0] in STRAT_COLUMN else DEFAULT_BASIN
+        benches: dict[str, BenchInfo] = {
+            fb: BenchInfo(fb, None, 0, 0, 0, None, strat_rank=i)
+            for i, fb in enumerate(STRAT_COLUMN[basin])
+        }
+
         # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox. PUDs pass
         # the SAME reconciliation filter as _STICK_SQL (realized ones are already
         # drilled) so the bench menu counts match what the map/gun-barrel shows.
+        # Counts only — stick TVDs are the last-resort tier below.
         cur.execute(
             """
-            SELECT ifb.formation_blueox AS fb, il.category, COUNT(*) AS n,
-                   percentile_cont(0.5) WITHIN GROUP (ORDER BY il.tvd) AS med_tvd
+            SELECT ifb.formation_blueox AS fb, il.category, COUNT(*) AS n
             FROM curated.intel_locations il
             JOIN curated.intel_formation_blueox ifb USING (stick_id)
             LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
@@ -522,10 +639,8 @@ def available_benches(
             """,
             {"aoi": aoi, "buf": buf_m},
         )
-        for fb, category, n, med_tvd in cur.fetchall():
-            b = benches.setdefault(fb, BenchInfo(fb, med_tvd, 0, 0, 0, None))
-            if med_tvd is not None and b.median_tvd_ft is None:
-                b.median_tvd_ft = med_tvd
+        for fb, category, n in cur.fetchall():
+            b = benches.setdefault(fb, BenchInfo(fb, None, 0, 0, 0, None))
             if category == "PUD":
                 b.n_pud += n
             elif category == "RES":
@@ -533,7 +648,7 @@ def available_benches(
             elif category == "PDP":
                 b.n_pdp += n
 
-        # PDP producers (authoritative for proven benches + their median TVD)
+        # PDP producers in the ring (authoritative for proven benches + TVD)
         cur.execute(
             """
             SELECT formation_blueox AS fb, COUNT(*) AS n,
@@ -549,10 +664,40 @@ def available_benches(
             {"aoi": aoi, "buf": buf_m},
         )
         for fb, n, med_tvd in cur.fetchall():
-            b = benches.setdefault(fb, BenchInfo(fb, med_tvd, 0, 0, 0, None))
+            b = benches.setdefault(fb, BenchInfo(fb, None, 0, 0, 0, None))
             b.n_pdp = max(b.n_pdp, n)                  # producers, not intel-PDP sticks
-            if med_tvd is not None:
-                b.median_tvd_ft = med_tvd              # producer TVD supersedes
+            if med_tvd is not None:                    # producer TVD supersedes Novi
+                b.median_tvd_ft = med_tvd
+                thin = " (thin)" if n < _TVD_LOCAL_MIN_WELLS else ""
+                b.tvd_basis = f"{n} producers within {ring_mi:g} mi{thin}"
+                b.tvd_local = True
+
+        # No producer in the ring: Novi stick TVDs in the ring (same precedence as
+        # before the full column), then — only for benches with NOTHING in the
+        # ring, i.e. rows that exist because the column is always listed — the
+        # nearest producers out to _TVD_FAR_M, then the nearest Novi sticks.
+        tiers = (
+            (_NEAREST_STICK_TVD_SQL, buf_m, 100_000, "Novi sticks", True),
+            (_NEAREST_PRODUCER_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "producers", False),
+            (_NEAREST_STICK_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "Novi sticks", False),
+        )
+        for sql, reach_m, n_max, label, local in tiers:
+            missing = [fb for fb, b in benches.items() if b.median_tvd_ft is None]
+            if not missing:
+                break
+            cur.execute(sql, {"aoi": aoi, "far": reach_m, "codes": missing, "n": n_max})
+            near: dict[str, list[tuple[float, float]]] = {}
+            for fb, tvd, dist_m in cur.fetchall():
+                near.setdefault(fb, []).append((float(tvd), float(dist_m)))
+            for fb, pts in near.items():
+                b = benches[fb]
+                b.median_tvd_ft = _median([t for t, _ in pts])
+                b.tvd_local = local
+                if local:
+                    b.tvd_basis = f"{len(pts)} {label} within {ring_mi:g} mi"
+                else:
+                    reach_mi = max(d for _, d in pts) * FT_PER_M / 5280.0
+                    b.tvd_basis = f"nearest {len(pts)} {label}, out to {reach_mi:.1f} mi"
 
         # de-facto per-bench spacing: project same-bench stick centroids onto the
         # cross-section axis (perpendicular to the grid azimuth) and take the
@@ -601,8 +746,7 @@ def available_benches(
         if gaps:
             benches[fb].suggested_spacing_ft = round(_median(gaps), 0)
 
-    out = sorted(benches.values(),
-                 key=lambda b: (b.median_tvd_ft if b.median_tvd_ft is not None else 1e9))
+    out = sorted(benches.values(), key=_strat_sort_key)
     for b in out:
         srcs = []
         if b.n_pdp:
@@ -612,9 +756,10 @@ def available_benches(
         if b.n_res:
             srcs.append(f"{b.n_res} RES")
         sp = f", ~{b.suggested_spacing_ft:.0f} ft spacing" if b.suggested_spacing_ft else ""
-        b.note = (f"{b.formation} @ {b.median_tvd_ft:,.0f} ft TVD "
+        b.note = (f"{b.formation} @ {b.median_tvd_ft:,.0f} ft TVD [{b.tvd_basis}] "
                   f"({', '.join(srcs) or 'no control'}{sp})"
-                  if b.median_tvd_ft is not None else f"{b.formation} ({', '.join(srcs)})")
+                  if b.median_tvd_ft is not None
+                  else f"{b.formation} (no TVD control; {', '.join(srcs) or 'no control'})")
     return out
 
 

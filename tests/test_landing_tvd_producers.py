@@ -42,6 +42,8 @@ def test_landing_tvd_stats_filters_to_producers():
 def test_bench_menu_producer_median_filters_to_producers():
     conn = _Conn()
     available_benches(conn, _PARCEL)
-    wells_sql = [s for s in conn.cur.sqls if "curated.wells_enriched" in s]
-    assert wells_sql, "bench menu no longer reads producers from wells_enriched"
-    assert "first_production_date IS NOT NULL" in wells_sql[0]
+    # every producer-TVD read (ring median AND the widened nearest-offset tier);
+    # the basin lookup reads wells_enriched too but takes no TVD from it
+    wells_sql = [s for s in conn.cur.sqls if "curated.wells_enriched" in s and "tvd_ft" in s]
+    assert len(wells_sql) >= 2, "bench menu no longer reads producer TVDs from wells_enriched"
+    assert all("first_production_date IS NOT NULL" in s for s in wells_sql)
