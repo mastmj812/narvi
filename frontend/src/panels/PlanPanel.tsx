@@ -268,14 +268,22 @@ export function PlanPanel() {
               style={{ marginBottom: 4, opacity: src === "off" ? (flagged ? 0.45 : 0.55) : 1 }}>
               <div className="field">
                 <label
-                  title={`${ctrl}${b.median_tvd_ft != null ? ` @ ${b.median_tvd_ft.toLocaleString()}' TVD` : ""}${
+                  title={`${ctrl}${b.median_tvd_ft != null
+                    ? ` @ ${Math.round(b.median_tvd_ft).toLocaleString()}' TVD (${b.tvd_basis ?? "?"})`
+                    : " — no TVD control within 10 mi: generate would fall back to the deal-level TVD; enter a correlated pick"}${
+                    b.inversion ? ` — STRAT INVERSION: ${b.inversion}; check the bench labels / enter a correlated TVD` : ""}${
                     flagged ? " — OUTSIDE the deal depth window (soft flag; enabling is an engineer override)" : ""}`}
                 >
                   <i className="swatch" style={{ background: colorForBlueox(b.formation) }} />
                   {" "}{b.formation}
                   {flagged && <span style={{ color: "#b45309" }} aria-label="outside depth window"> ⚠</span>}
-                  {b.median_tvd_ft != null && (
-                    <span style={{ color: "var(--muted)" }}> {Math.round(b.median_tvd_ft).toLocaleString()}'</span>
+                  {b.inversion && <span style={{ color: "#dc2626" }} aria-label="stratigraphic inversion"> ⇅</span>}
+                  {b.median_tvd_ft != null ? (
+                    <span style={{ color: "var(--muted)", fontStyle: b.tvd_local === false ? "italic" : undefined }}>
+                      {" "}{b.tvd_local === false ? "≈" : ""}{Math.round(b.median_tvd_ft).toLocaleString()}'
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--muted)" }}> —</span>
                   )}
                   <span style={{ color: "var(--muted)", fontSize: 10 }}> · {ctrl}</span>
                 </label>

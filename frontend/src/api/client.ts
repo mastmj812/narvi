@@ -112,6 +112,9 @@ export interface BenchInfo {
   note: string;
   n_supported?: number | null;     // pud/res sticks with offset support (sql/30)
   depth_allowed?: boolean | null;  // false = outside the deal depth window (soft flag)
+  strat_rank?: number | null;      // position in the basin's strat column (0 = shallowest)
+  tvd_basis?: string | null;       // provenance of median_tvd_ft (offset tier)
+  tvd_local?: boolean | null;      // false = widened past the 1-mi ring
 }
 
 export interface InventoryResponse {

@@ -60,10 +60,11 @@ function paramsFromScenario(sp: Record<string, unknown> | null | undefined): Par
 }
 
 // One row per bench in the unified bench table: the union of the unit's overlap
-// inventory (Novi counts) and the area-developable benches (generation TVD /
-// spacing control). Overlap counts are the unit's truth; the dev median TVD is
-// preferred for generation (producer-sourced — overlap medians can carry Novi
-// placeholder TVDs, e.g. WDFD RES ~19k).
+// inventory (Novi counts) and the dev menu — the basin's FULL strat column,
+// always listed (generate places what Novi didn't stick). Rows run in column
+// order, never TVD order. Overlap counts are the unit's truth; the dev median
+// TVD is preferred for generation (offset-sourced — overlap medians can carry
+// Novi placeholder TVDs, e.g. WDFD RES ~19k).
 export interface BenchRow {
   formation: string;
   median_tvd_ft: number | null;
@@ -74,6 +75,30 @@ export interface BenchRow {
   hasNovi: boolean;               // any overlapping PUD/RES to adopt
   n_supported: number | null;     // pud/res sticks with offset support (sql/30); null in dev-only
   depthAllowed: boolean | null;   // false = outside the deal depth window (soft flag)
+  strat_rank: number | null;      // column position; null = off-column code (sorts last)
+  tvd_basis: string | null;       // where the TVD came from (offset tier)
+  tvd_local: boolean | null;      // false = widened past the ring -> show as approximate
+  // TVD contradicts column order against the nearest TVD-bearing neighbour
+  // (e.g. "shallower than WCA_1 (12,154')"); null = consistent / no TVD.
+  inversion: string | null;
+}
+
+// Flag adjacent stratigraphic inversions on the EFFECTIVE TVD (override wins,
+// so entering a corrected pick clears the flag). Each row is compared with the
+// next TVD-bearing row below it in the column; both sides of a violating pair
+// get the note, so one bad label flags two rows, not the whole column.
+function flagInversions(rows: BenchRow[], tvdOverride: Record<string, number | null>): void {
+  const tvdOf = (r: BenchRow) => tvdOverride[r.formation] ?? r.median_tvd_ft;
+  const ft = (v: number) => `${Math.round(v).toLocaleString()}'`;
+  const ranked = rows.filter((r) => r.strat_rank != null && tvdOf(r) != null);
+  for (let i = 0; i + 1 < ranked.length; i++) {
+    const up = ranked[i], dn = ranked[i + 1];
+    const tu = tvdOf(up)!, td = tvdOf(dn)!;
+    if (tu > td) {
+      up.inversion = `deeper than ${dn.formation} (${ft(td)}), which sits below it`;
+      dn.inversion = `shallower than ${up.formation} (${ft(tu)}), which sits above it`;
+    }
+  }
 }
 
 // Client-side mirror of the engine's apply_depth_window arithmetic
@@ -87,7 +112,9 @@ export function depthAllowedFor(
   return tvd >= (w.minFt ?? -Infinity) && tvd <= (w.maxFt ?? Infinity);
 }
 
-export function benchRows(s: Pick<State, "benches" | "devBenches" | "parcel">): BenchRow[] {
+export function benchRows(
+  s: Pick<State, "benches" | "devBenches" | "parcel"> & Partial<Pick<State, "benchTvd">>,
+): BenchRow[] {
   const map = new Map<string, BenchRow>();
   const w = s.parcel?.depthWindow;
   for (const b of s.devBenches) {
@@ -97,6 +124,8 @@ export function benchRows(s: Pick<State, "benches" | "devBenches" | "parcel">): 
       suggested_spacing_ft: b.suggested_spacing_ft, hasNovi: false,
       n_supported: null,
       depthAllowed: depthAllowedFor(b.median_tvd_ft, w),
+      strat_rank: b.strat_rank ?? null, tvd_basis: b.tvd_basis ?? null,
+      tvd_local: b.tvd_local ?? null, inversion: null,
     });
   }
   for (const b of s.benches) {
@@ -110,10 +139,18 @@ export function benchRows(s: Pick<State, "benches" | "devBenches" | "parcel">): 
       hasNovi: b.n_pud + b.n_res > 0,
       n_supported: b.n_supported ?? null,
       depthAllowed: depthAllowedFor(tvd, w),
+      strat_rank: dev?.strat_rank ?? null,
+      tvd_basis: dev?.median_tvd_ft != null ? dev.tvd_basis ?? null
+        : tvd != null ? "in-unit Novi sticks" : null,
+      tvd_local: dev?.median_tvd_ft != null ? dev.tvd_local ?? null : tvd != null ? true : null,
+      inversion: null,
     });
   }
-  return [...map.values()].sort(
-    (a, b) => (a.median_tvd_ft ?? Infinity) - (b.median_tvd_ft ?? Infinity));
+  const rows = [...map.values()].sort(
+    (a, b) => (a.strat_rank ?? Infinity) - (b.strat_rank ?? Infinity)
+      || (a.median_tvd_ft ?? Infinity) - (b.median_tvd_ft ?? Infinity));
+  flagInversions(rows, s.benchTvd ?? {});
+  return rows;
 }
 
 // Default sources on inventory load: adopt Novi wherever the unit has PUD/RES;
