@@ -165,6 +165,10 @@ class Zone:
     formation: str          # formation_blueox code
     target_tvd_ft: float    # median landing TVD (parameter for now; warehouse later)
     spacing_ft: float | None = None   # per-bench leg-to-leg; None -> use the base spacing
+    # per-bench 'single' | 'uturn'; None -> the deal's ScenarioParams.well_type. Lets a
+    # stack mix U-turn benches with straight sticks (Vault S2: U-turn BS1_S/BS3_C + a
+    # single WCA_1 kept off the University 45 20 1H). The U-turn floor still gates.
+    well_type: str | None = None
 
 
 @dataclass

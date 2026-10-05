@@ -345,6 +345,17 @@ def _deal_anchor(window, az, p, uturn, spacing_m, gb) -> str:
     return best_a
 
 
+def _zone_type(base: ScenarioParams, z: Zone) -> str:
+    """A bench's well type: its own override, else the deal default."""
+    return z.well_type or base.well_type
+
+
+def _zone_uturn(base: ScenarioParams, z: Zone, sp: float) -> bool:
+    """True when this bench places U-turns: U-turn type AND its spacing clears the
+    leg-to-leg floor (below it the bench falls back to singles, flagged)."""
+    return _zone_type(base, z) == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+
+
 def _deal_anchor_zones(parcel, window, az, base, zs, z_spacings, gb
                        ) -> tuple[str, float, tuple]:
     """Wine-rack deal anchor: evaluate each anchor on the ZONES AS THEY WILL PLACE
@@ -372,9 +383,9 @@ def _deal_anchor_zones(parcel, window, az, base, zs, z_spacings, gb
         ft = 0.0
         for i, (z, sp) in enumerate(zip(zs, z_spacings)):
             off = (i % 2) * (sp / 2.0)                  # the placement loop's stagger
-            u = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+            u = _zone_uturn(base, z, sp)
             p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
-                          spacing_ft=sp)
+                          spacing_ft=sp, well_type=_zone_type(base, z))
             ws, _ = _place_for_anchor(window, az_a, p_i, off, a, u, sp / FT_PER_M, gb_a)
             ft += sum(w.completed_lateral_ft for w in ws)
         better = ft > best_ft + 1.0                     # center first -> wins ties
@@ -560,11 +571,13 @@ def generate_wine_rack(
     window0 = drillable_window(parcel, ns, ew)
     az = _resolve_azimuth(parcel, window0, base) % 180.0
     gb = (az, (parcel.centroid.x, parcel.centroid.y))
-    # deal-level decisions run at the shallowest zone's spacing (a representative of
-    # what actually places; zones share the resulting anchor/turn end either way)
-    base_eval = replace(base, spacing_ft=lead_spacing)
-    u = base.well_type == "uturn" and lead_spacing >= base.uturn_min_leg_to_leg_ft
-    spacing_m = lead_spacing / FT_PER_M
+    # The deal turn end is judged on the shallowest bench that actually places
+    # U-turns (zones share the resulting turn end either way); single benches have
+    # no turn to orient. No U-turn bench -> no turn end to fix.
+    u_spacings = [sp for z, sp in zip(zs, z_spacings) if _zone_uturn(base, z, sp)]
+    u = bool(u_spacings)
+    base_eval = replace(base, spacing_ft=u_spacings[0] if u else lead_spacing,
+                        well_type="uturn")
     # Fix the row anchor ONCE for the deal (zones share where development hangs),
     # judged on the zones as they will actually place (spacing + stagger phase).
     anchor_stipulated = base.anchor != "auto"
@@ -590,9 +603,9 @@ def generate_wine_rack(
     # stipulated W/E/center anchor is a design intent — never shifted.
     def _zone_wells(i: int, z, sp: float, delta: float):
         off = (i % 2) * (sp / 2.0) + delta
-        u_i = base.well_type == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
+        u_i = _zone_uturn(base, z, sp)
         p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
-                      spacing_ft=sp)
+                      spacing_ft=sp, well_type=_zone_type(base, z))
         return _place_for_anchor(window0, az, p_i, off, base.anchor, u_i,
                                  sp / FT_PER_M, gb)[0]
 
@@ -630,7 +643,7 @@ def generate_wine_rack(
         off = (i % 2) * (z_spacing / 2.0) + shift     # alternate by depth (+ slack shift)
         offsets.append(off)
         p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
-                    spacing_ft=z_spacing, azimuth_deg=az)
+                    spacing_ft=z_spacing, azimuth_deg=az, well_type=_zone_type(base, z))
         wells, window, feas = generate_scenario(
             parcel, p, row_offset_ft=off, optimize_phase=False, force_azimuth=az)
         all_wells.extend(wells)
@@ -663,10 +676,11 @@ def generate_wine_rack(
     if total_wells == 0:
         from .feasibility import zero_well_hint
         zero_hint = zero_well_hint(parcel, replace(base, spacing_ft=lead_spacing), az)
-    well_kind = "uturn" if any(w.turn for w in all_wells) else "single"
+    kinds = {"uturn" if w.turn else "single" for w in all_wells}
+    well_kind = "mixed" if len(kinds) > 1 else (kinds.pop() if kinds else "single")
     # flag the floor per ZONE, at the spacing that placed that zone's wells
     floored_zs = [f"{z.formation} {sp:.0f}" for z, sp in zip(zs, z_spacings)
-                  if base.well_type == "uturn" and sp < base.uturn_min_leg_to_leg_ft]
+                  if _zone_type(base, z) == "uturn" and sp < base.uturn_min_leg_to_leg_ft]
     report = WineRackReport(
         zones=zresults, total_wells=total_wells, total_legs=total_legs,
         total_completed_ft=round(sum(w.completed_lateral_ft for w in all_wells), 1),
