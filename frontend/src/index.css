@@ -65,6 +65,16 @@ button.ghost {
   padding: 6px; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 5px; background: #fff;
 }
 .scenario-row .meta { font-size: 11px; color: var(--muted); }
+
+/* save feedback: the status line + the saved row flash once per save (keyed
+   on the save time, so a re-save of the same top row still visibly confirms) */
+@keyframes save-flash { from { background: #bbf7d0; } to { background: transparent; } }
+.save-status { font-size: 11px; margin-top: 4px; }
+.save-status.saved { color: #15803d; animation: save-flash 1.6s ease-out; border-radius: 4px; }
+.save-status.saving { color: var(--muted); }
+.save-status.error { color: #b91c1c; }
+.scenario-row.just-saved { animation: save-flash 1.6s ease-out; }
+.declared-flag { font-size: 11px; color: #b45309; margin: -2px 0 6px; }
 .scenario-row button { font-size: 11px; }
 
 /* map + overlays */

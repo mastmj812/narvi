@@ -401,6 +401,10 @@ interface State {
   loading: boolean;
   error: string | null;
   scenarios: ScenarioSummary[];
+  // Save-button feedback: the server re-derives + regenerates, so a save takes
+  // seconds and the list re-sort alone isn't a confirmation (a re-save of the
+  // top row doesn't move). `at` = completion time; `msg` = rollup or error.
+  saveStatus: { state: "idle" | "saving" | "saved" | "error"; at?: number; msg?: string };
 
   // map overlays: Texas/NM survey grid (blocks + sections) + basin-wide PDP tiles
   showBlocks: boolean;
@@ -465,6 +469,7 @@ const PARCEL_RESET = {
   feasibility: null, scan: null, scanning: false,
   categoryOverrides: {} as Record<string, "PUD" | "UPSIDE">,
   lastGenKey: null, loaded: null, error: null,
+  saveStatus: { state: "idle" as const },
 };
 
 export const useStore = create<State>((set, get) => ({
@@ -493,6 +498,7 @@ export const useStore = create<State>((set, get) => ({
   loading: false,
   error: null,
   scenarios: [],
+  saveStatus: { state: "idle" },
 
   // survey grid on by default so it's visible without hunting for a toggle;
   // both are zoom-gated (blocks z8, sections z11) and lazy-fetched by MapView.
@@ -694,6 +700,7 @@ export const useStore = create<State>((set, get) => ({
       basis: dw?.basis ?? "",
       attributes: s.parcel.attributes ?? {}, tracts: s.parcel.tracts ?? [],
     } : undefined;
+    set({ saveStatus: { state: "saving" } });
     try {
       const finalName = name || s.parcel.label;
       const body = {
@@ -708,8 +715,9 @@ export const useStore = create<State>((set, get) => ({
         source_azimuth: s.sourceAzimuth,
         deal_terms: dealTerms,
       };
+      let saved: { saved_wells: number };
       try {
-        await api.saveComposedScenario(body);
+        saved = await api.saveComposedScenario(body);
       } catch (e) {
         // 409 override_drop: the PERSISTED scenario carries PUD/UPSIDE overrides
         // on wells still in this plan that this save would silently reset to
@@ -728,8 +736,8 @@ export const useStore = create<State>((set, get) => ({
           `classification:\n\n${wells}\n\n` +
           `If you didn't intend to clear them, cancel and re-load the scenario ` +
           `first. Save anyway and discard these overrides?`);
-        if (!ok) return;
-        await api.saveComposedScenario({ ...body, force: true });
+        if (!ok) { set({ saveStatus: { state: "idle" } }); return; }
+        saved = await api.saveComposedScenario({ ...body, force: true });
       }
       await get().refreshScenarios();
       // the saved scenario is now "the one we're working on" — the loaded marker
@@ -737,8 +745,14 @@ export const useStore = create<State>((set, get) => ({
       set({
         loaded: { deal_id: deal, scenario_id: `plan_${slug}`, name: finalName },
         categoryOverrides,
+        saveStatus: {
+          state: "saved", at: Date.now(),
+          msg: `${saved.saved_wells} well${saved.saved_wells === 1 ? "" : "s"}`,
+        },
       });
-    } catch (e) { set({ error: String(e) }); }
+    } catch (e) {
+      set({ error: String(e), saveStatus: { state: "error", at: Date.now(), msg: String(e) } });
+    }
   },
 
   load: async (deal_id, scenario_id) => {
