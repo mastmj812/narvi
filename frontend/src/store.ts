@@ -153,20 +153,60 @@ export function benchRows(
   return rows;
 }
 
-// Default sources on inventory load: adopt Novi wherever the unit has PUD/RES;
-// everything else (dev-only or PDP-only benches) starts off. A bench outside
-// the deal depth window seeds off even with Novi sticks (SOFT: the user can
-// still flip it on — that's the override).
+// Default sources on inventory load, judged on the same TVD the bench table
+// shows (benchRows):
+// - window set: every in-window bench with LOCAL TVD evidence starts on —
+//   Novi where the unit has PUD/RES, generate otherwise. Out-of-window and
+//   widened-TVD benches (tvd_local false — offsets miles out, e.g. an inverted
+//   WCD) start off.
+// - no window: Novi wherever the unit has PUD/RES, everything else off.
+// SOFT either way: any bench can still be flipped — that's the override.
 function seedBenchSources(
-  inv: InventoryResponse, w: DepthWindow | undefined,
+  inv: InventoryResponse, parcel: ParcelInfo,
 ): Record<string, BenchSource> {
+  const w = parcel.depthWindow;
+  const windowSet = !!w && (w.minFt != null || w.maxFt != null);
   const src: Record<string, BenchSource> = {};
-  for (const b of inv.dev_benches) src[b.formation] = "off";
-  for (const b of inv.benches) {
-    const allowed = depthAllowedFor(b.median_tvd_ft, w);
-    src[b.formation] = b.n_pud + b.n_res > 0 && allowed !== false ? "novi" : "off";
+  for (const r of benchRows({ benches: inv.benches, devBenches: inv.dev_benches, parcel })) {
+    if (!windowSet) src[r.formation] = r.hasNovi ? "novi" : "off";
+    else if (r.depthAllowed !== true || r.tvd_local !== true) src[r.formation] = "off";
+    else src[r.formation] = r.hasNovi ? "novi" : "generate";
   }
   return src;
+}
+
+// Land files write depths as free text. Only a bare number (commas, optional
+// ' / ft) or "Surface" parses; anything formation-relative ("COE", "Base of
+// WCB", "9,500 ft -> COE") is left for the engineer — never guessed.
+export function parseDeclaredDepth(v: unknown): number | "surface" | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  if (/^surface$/i.test(t)) return "surface";
+  const m = /^(\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*(?:'|ft|feet)?$/i.exec(t);
+  return m ? Number(m[1].replace(/,/g, "")) : null;
+}
+
+// Prefill the working window from the DSU-level declared depths when the
+// parcel has no window yet and at least one bound is numeric. Flagged
+// fromDeclared so the panel says it's uncorrelated until the engineer edits it.
+export function withDeclaredWindow(p: ParcelInfo): ParcelInfo {
+  const cur = p.depthWindow;
+  if (cur && (cur.minFt != null || cur.maxFt != null || cur.basis)) return p;
+  const a = p.attributes ?? {};
+  const lo = parseDeclaredDepth(a["Min_Depth"]);
+  const hi = parseDeclaredDepth(a["Max_Depth"]);
+  const minFt = typeof lo === "number" ? lo : null;
+  const maxFt = typeof hi === "number" ? hi : null;
+  if (minFt == null && maxFt == null) return p;
+  return {
+    ...p,
+    depthWindow: {
+      minFt, maxFt, fromDeclared: true,
+      basis: `land file declared ${String(a["Min_Depth"] ?? "—")} → `
+        + `${String(a["Max_Depth"] ?? "—")} (uncorrelated)`,
+    },
+  };
 }
 
 // The generator zones implied by the bench table: every generate-sourced bench,
@@ -485,8 +525,11 @@ export const useStore = create<State>((set, get) => ({
   setDepthWindow: (patch) =>
     set((s) => {
       if (!s.parcel) return {};
+      // any edit makes the window the engineer's own (drops the
+      // "prefilled from the land file" flag)
       const dw: DepthWindow = {
         minFt: null, maxFt: null, basis: "", ...s.parcel.depthWindow, ...patch,
+        fromDeclared: false,
       };
       const label = s.parcel.label;
       return {
@@ -504,7 +547,7 @@ export const useStore = create<State>((set, get) => ({
 
   uploadParcels: async (file) => {
     try {
-      const { parcels } = await api.uploadParcels(file);
+      const parcels = (await api.uploadParcels(file)).parcels.map(withDeclaredWindow);
       set({ parcels, parcel: parcels[0] ?? null, ...PARCEL_RESET });
     } catch (e) { set({ error: String(e) }); }
   },
@@ -527,7 +570,7 @@ export const useStore = create<State>((set, get) => ({
       set({
         inventory: inv, benches: inv.benches, devBenches: inv.dev_benches,
         ...(seed ? {
-          benchSource: seedBenchSources(inv, dw),
+          benchSource: seedBenchSources(inv, s.parcel),
           params: shallow
             ? { ...get().params, formation: shallow.formation,
                 target_tvd_ft: shallow.median_tvd_ft ?? get().params.target_tvd_ft }
@@ -717,16 +760,20 @@ export const useStore = create<State>((set, get) => ({
         const zones = cs.generate?.zones ?? [];
         // rehydrate deal terms (depth window + declared gpkg attrs/tracts)
         // onto the rebuilt parcel — the AOI in the DB is geometry-only
+        // a save made before the window prefill existed (blank window) gets the
+        // declared prefill too; a saved window always wins
         const dt = cs.deal_terms;
-        const restoredParcel: ParcelInfo = dt ? {
+        const restoredParcel: ParcelInfo = dt ? withDeclaredWindow({
           ...r.parcel,
           attributes: dt.attributes ?? r.parcel.attributes,
           tracts: dt.tracts ?? r.parcel.tracts,
           depthWindow: (dt.min_depth_ft != null || dt.max_depth_ft != null || dt.basis)
             ? { minFt: dt.min_depth_ft ?? null, maxFt: dt.max_depth_ft ?? null,
-                basis: dt.basis ?? "" }
+                basis: dt.basis ?? "",
+                // a prefill saved without edits still reads as uncorrelated
+                fromDeclared: (dt.basis ?? "").startsWith("land file declared") }
             : undefined,
-        } : r.parcel;
+        }) : r.parcel;
         set({
           parcels: mergeParcels(restoredParcel), parcel: restoredParcel, ...PARCEL_RESET,
           loaded: { deal_id, scenario_id, name: meta?.name ?? null },

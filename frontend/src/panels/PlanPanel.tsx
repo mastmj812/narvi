@@ -198,10 +198,16 @@ export function PlanPanel() {
           )}
           <div
             className="note"
-            title="The number that drives bench flagging — YOUR correlated depth, typed here, never parsed from the file. Soft: out-of-window benches grey out and seed off but stay selectable."
+            title="The number that drives bench flagging and the default bench selection on Load inventory. Prefilled from the land file's declared depths when they're plain numbers — correct it to the local correlated depth BEFORE loading inventory. Soft: out-of-window benches grey out and seed off but stay selectable."
           >
             working window (correlated, ft TVD)
           </div>
+          {dw?.fromDeclared && (
+            <div className="declared-flag"
+              title="Declared land-file depths can be stratigraphic picks on a reference log miles away (Toucan: 9,515′ declared ≈ 9,950′ local). Any edit here clears this flag.">
+              ⚠ prefilled from the land file — not yet correlated
+            </div>
+          )}
           <div className="field">
             <label style={{ fontSize: 11 }}>min / max</label>
             <span>
