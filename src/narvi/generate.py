@@ -15,6 +15,7 @@ import math
 from dataclasses import replace
 
 from pyproj import CRS, Transformer
+from shapely.affinity import rotate
 from shapely.geometry.base import BaseGeometry
 
 from .parcel import WORK_EPSG
@@ -356,6 +357,30 @@ def _zone_uturn(base: ScenarioParams, z: Zone, sp: float) -> bool:
     return _zone_type(base, z) == "uturn" and sp >= base.uturn_min_leg_to_leg_ft
 
 
+def _zone_params(base: ScenarioParams, z: Zone, sp: float) -> ScenarioParams:
+    """The params a bench places with: the deal's, overlaid with the bench's own
+    formation/TVD/spacing and any per-bench well type / min lateral."""
+    return replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
+                   spacing_ft=sp, well_type=_zone_type(base, z),
+                   min_lateral_ft=(z.min_lateral_ft if z.min_lateral_ft is not None
+                                   else base.min_lateral_ft))
+
+
+def _pinned_row_offset_ft(window: BaseGeometry, az: float, gb, target_ft: float) -> float:
+    """The center-anchor `row_offset_ft` that lands a row at gunbarrel offset
+    `target_ft`. laterals_rotated hangs center rows from the rotated window's
+    mid-y; the gunbarrel offset is linear in rotated y (the cross axis IS the
+    rotated y axis, up to sign and the window-vs-parcel centroid shift), so
+    measure that line at two points and solve."""
+    centroid = window.centroid
+    phi = 90.0 - az
+    minx, miny, maxx, maxy = rotate(window, -phi, origin=centroid, use_radians=False).bounds
+    xm, y_mid = (minx + maxx) / 2.0, (miny + maxy) / 2.0
+    g0 = gunbarrel_offset_ft(unrotate(xm, y_mid, centroid, phi), gb[0], gb[1])
+    g1 = gunbarrel_offset_ft(unrotate(xm, y_mid + 1.0, centroid, phi), gb[0], gb[1])
+    return (target_ft - g0) / (g1 - g0) * FT_PER_M      # (g1 - g0) = +/- ft per m
+
+
 def _deal_anchor_zones(parcel, window, az, base, zs, z_spacings, gb
                        ) -> tuple[str, float, tuple]:
     """Wine-rack deal anchor: evaluate each anchor on the ZONES AS THEY WILL PLACE
@@ -382,10 +407,11 @@ def _deal_anchor_zones(parcel, window, az, base, zs, z_spacings, gb
     for a, az_a, gb_a, snap in cands:
         ft = 0.0
         for i, (z, sp) in enumerate(zip(zs, z_spacings)):
+            if z.offset_ft is not None:
+                continue                                # pinned: not the deal's to place
             off = (i % 2) * (sp / 2.0)                  # the placement loop's stagger
             u = _zone_uturn(base, z, sp)
-            p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
-                          spacing_ft=sp, well_type=_zone_type(base, z))
+            p_i = _zone_params(base, z, sp)
             ws, _ = _place_for_anchor(window, az_a, p_i, off, a, u, sp / FT_PER_M, gb_a)
             ft += sum(w.completed_lateral_ft for w in ws)
         better = ft > best_ft + 1.0                     # center first -> wins ties
@@ -604,8 +630,7 @@ def generate_wine_rack(
     def _zone_wells(i: int, z, sp: float, delta: float):
         off = (i % 2) * (sp / 2.0) + delta
         u_i = _zone_uturn(base, z, sp)
-        p_i = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
-                      spacing_ft=sp, well_type=_zone_type(base, z))
+        p_i = _zone_params(base, z, sp)
         return _place_for_anchor(window0, az, p_i, off, base.anchor, u_i,
                                  sp / FT_PER_M, gb)[0]
 
@@ -614,6 +639,7 @@ def generate_wine_rack(
         def _total(delta: float) -> float:
             return sum(w.completed_lateral_ft
                        for i, (z, sp) in enumerate(zip(zs, z_spacings))
+                       if z.offset_ft is None
                        for w in _zone_wells(i, z, sp, delta))
         period = max(z_spacings)
         best_ft = _total(0.0)
@@ -640,10 +666,15 @@ def generate_wine_rack(
         # per-bench spacing (Novi develops Bone Spring wider than Wolfcamp); the
         # stagger and offset follow that bench's spacing, falling back to the base.
         z_spacing = z.spacing_ft if z.spacing_ft else base.spacing_ft
-        off = (i % 2) * (z_spacing / 2.0) + shift     # alternate by depth (+ slack shift)
+        p = replace(_zone_params(base, z, z_spacing), azimuth_deg=az)
+        if z.offset_ft is not None:
+            # pinned: a row exactly at the engineer's offset, center-hung so the
+            # phase is absolute (no anchor, stagger, or slack shift applied)
+            off = _pinned_row_offset_ft(window0, az, gb, z.offset_ft)
+            p = replace(p, anchor="center")
+        else:
+            off = (i % 2) * (z_spacing / 2.0) + shift  # alternate by depth (+ slack shift)
         offsets.append(off)
-        p = replace(base, formation=z.formation, target_tvd_ft=z.target_tvd_ft,
-                    spacing_ft=z_spacing, azimuth_deg=az, well_type=_zone_type(base, z))
         wells, window, feas = generate_scenario(
             parcel, p, row_offset_ft=off, optimize_phase=False, force_azimuth=az)
         all_wells.extend(wells)
@@ -692,11 +723,17 @@ def generate_wine_rack(
               f"{('%.0f ft' % min_off) if finite else 'n/a'}"
               + (f"; pattern slack-shifted {shift:.0f} ft cross-axis (full-length rows)"
                  if shift else "")
+              + ("; pinned: " + ", ".join(f"{z.formation} at {z.offset_ft:+.0f} ft"
+                                          for z in zs if z.offset_ft is not None)
+                 if any(z.offset_ft is not None for z in zs) else "")
               + ("" if ok else f"  [< {min_interzone_offset_ft:.0f} ft -> frac-hit risk]")
               + (f"  [U-turn leg-to-leg < {base.uturn_min_leg_to_leg_ft:.0f} ft floor -> "
                  f"singles: {', '.join(floored_zs)}]" if floored_zs else "")
               + (f"  [{dropped_total} short well{'s' if dropped_total != 1 else ''} "
-                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped]" if dropped_total else "")
+                 f"< {base.min_lateral_ft:.0f} ft min lateral dropped"
+                 + "".join(f"; {z.formation} min {z.min_lateral_ft:.0f}" for z in zs
+                           if z.min_lateral_ft is not None)
+                 + "]" if dropped_total else "")
               + zero_hint),
     )
     return all_wells, window, report
