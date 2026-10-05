@@ -239,6 +239,11 @@ def _well_from_detail(detail: dict) -> InventoryWell:
         # from `detail`; see warehouse.apply_novi_rep)
         stick_id=detail.get("stick_id"),
         novi_rep=detail.get("novi_rep"),
+        # PDP standoff (frac-hit) annotation — absent on pre-check saves
+        pdp_gap_ft=detail.get("pdp_gap_ft"),
+        pdp_gap_horiz_ft=detail.get("pdp_gap_horiz_ft"),
+        pdp_gap_dtvd_ft=detail.get("pdp_gap_dtvd_ft"),
+        pdp_gap_well=detail.get("pdp_gap_well"),
     )
 
 

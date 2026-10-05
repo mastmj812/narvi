@@ -29,6 +29,7 @@ from .records import (
     Zone,
     ZoneResult,
 )
+from .proximity import DEFAULT_PDP_STANDOFF_FT, apply_pdp_standoff
 from .shp_export import inventory_shapefile_zip
 from .viz import gunbarrel_data, scenario_geojson
 
@@ -57,4 +58,6 @@ __all__ = [
     "scenario_geojson",
     "gunbarrel_data",
     "inventory_shapefile_zip",
+    "apply_pdp_standoff",
+    "DEFAULT_PDP_STANDOFF_FT",
 ]

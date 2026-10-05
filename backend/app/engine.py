@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 from narvi import (
+    DEFAULT_PDP_STANDOFF_FT,
+    apply_pdp_standoff,
     generate_scenario,
     generate_wine_rack,
     gunbarrel_data,
@@ -20,11 +22,33 @@ from narvi import (
 from narvi.warehouse import (
     apply_handoff_support,
     get_connection,
+    inventory_from_warehouse,
     section_azimuth,
     zones_from_warehouse,
 )
 
 from .models import GenerateRequest, GenerateResponse
+
+
+# PDP fetched for the standoff check: any producer that can sit within the
+# flag distance of a planned leg is within that distance of the parcel, so a
+# quarter-mile ring (well past 660 ft) catches neighbours in adjacent units.
+PDP_STANDOFF_BUFFER_FT = 1320.0
+
+
+def check_pdp_standoff(conn, parcel, wells) -> list[str]:
+    """Frac-hit check of GENERATED wells against every horizontal producer in a
+    1,320 ft ring (unit membership NOT required — a parent in the next unit
+    frac-hits just the same). Annotates the wells (pdp_gap_*) and returns notes:
+    one per well inside the standoff, or a single all-clear line."""
+    planned = [w for w in wells if w.category == "generated"]
+    if not planned:
+        return []
+    pdp, _ = inventory_from_warehouse(conn, parcel, PDP_STANDOFF_BUFFER_FT, ("pdp",),
+                                      min_overlap_frac=0.0)
+    notes = apply_pdp_standoff(planned, pdp)
+    return notes or [f"PDP standoff: no planned well within {DEFAULT_PDP_STANDOFF_FT:,.0f} ft "
+                     f"(3-D) of a co-extent producer ({len(pdp)} PDP checked)"]
 
 
 def run_generate(req: GenerateRequest):
@@ -123,6 +147,8 @@ def run_generate(req: GenerateRequest):
                 f"handoff scoring: {n_pud} PUD / {len(wells) - n_pud} UPSIDE "
                 f"(pdp_count_3mi >= 3 -> PUD; override per well before save)"
             )
+            # rides the same live-check request (the UI always scores)
+            notes += check_pdp_standoff(conn, parcel, wells)
     finally:
         if conn is not None:
             conn.close()

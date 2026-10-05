@@ -133,6 +133,13 @@ class InventoryWell:
     # pass-through wells — stable across quarterly reloads (append-only
     # stick_id_map). None for generated wells and PDP producers.
     stick_id: int | None = None
+    # Nearest co-extent PDP producer in 3-D (proximity.apply_pdp_standoff): the
+    # frac-hit check against existing parents. None = not checked / no PDP runs
+    # alongside. Persists via `detail`.
+    pdp_gap_ft: float | None = None
+    pdp_gap_horiz_ft: float | None = None
+    pdp_gap_dtvd_ft: float | None = None
+    pdp_gap_well: str | None = None            # PDP api10
     # Representative novi_intel set for the TC-vs-Novi ML comparison
     # (warehouse.apply_novi_rep, filled at scenario save; anduin reads it from
     # `detail`). mode 'self' = the well IS a novi stick, compare against its own
