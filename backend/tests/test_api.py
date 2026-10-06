@@ -338,3 +338,55 @@ def test_guard_override_drop_409_and_force():
 
     # first save of a scenario (no persisted row) never conflicts
     _guard_override_drop(_FakeConn([]), "d", "s", None, {}, wells, force=False)
+
+
+def test_generate_winerack_per_bench_type_offset_and_min_lateral():
+    # Vault S2 recipe through the API: U-turn BS1_S over a single WCA_1 pinned at
+    # -660 ft with its own 4,000 ft min lateral under a U-turn-tuned 7,000 ft deal
+    body = {
+        "parcel": _half_section_geojson(),
+        "params": {"spacing_ft": 1320, "setback_ft": 330, "azimuth_deg": 90.0,
+                   "well_type": "uturn", "min_lateral_ft": 7000, "anchor": "auto"},
+        "mode": "winerack",
+        "zones": [
+            {"formation": "BS1_S", "target_tvd_ft": 9795, "spacing_ft": 1320},
+            {"formation": "WCA_1", "target_tvd_ft": 11800, "spacing_ft": 1320,
+             "well_type": "single", "offset_ft": -660, "min_lateral_ft": 4000},
+        ],
+    }
+    r = client.post("/api/generate", json=body)
+    assert r.status_code == 200, r.text
+    legs = [f["properties"] for f in r.json()["geojson"]["features"]
+            if f["properties"]["kind"] == "leg"]
+    wca = [p for p in legs if p["formation"] == "WCA_1"]
+    assert wca and all(p["well_type"] == "single" for p in wca)
+    assert {p["well_type"] for p in legs if p["formation"] == "BS1_S"} == {"uturn"}
+    assert "pinned: WCA_1 at -660 ft" in r.json()["summary"]
+
+
+def test_zone_model_rejects_bad_overrides():
+    from app.models import ZoneModel
+    import pydantic
+    import pytest
+    for bad in ({"well_type": "j-hook"}, {"min_lateral_ft": -1}):
+        with pytest.raises(pydantic.ValidationError):
+            ZoneModel(formation="WCA_1", target_tvd_ft=11800, **bad)
+    z = ZoneModel(formation="WCA_1", target_tvd_ft=11800).to_narvi()
+    assert z.well_type is None and z.offset_ft is None and z.min_lateral_ft is None
+
+
+def test_header_well_type_mixed_only_when_planned_wells_differ():
+    from narvi import InventoryWell, ScenarioParams
+    from narvi.persist import header_well_type
+
+    def w(t, cat="generated"):
+        return InventoryWell(scenario_id="", deal_id="", well_name=t + cat, well_type=t,
+                             formation="X", target_tvd_ft=1.0, lateral_azimuth_deg=0.0,
+                             legs=[], turn=None, completed_lateral_ft=0.0,
+                             drilled_lateral_ft=0.0, nearest_neighbor_spacing_ft=0.0,
+                             setback_ft=0.0, category=cat)
+    p = ScenarioParams(formation="X", target_tvd_ft=1.0, spacing_ft=1320.0, setback_ft=330.0,
+                       well_type="uturn")
+    assert header_well_type(p, [w("uturn"), w("single")]) == "mixed"
+    assert header_well_type(p, [w("uturn"), w("single", "pdp")]) == "uturn"  # PDP don't count
+    assert header_well_type(p, []) == "uturn"
