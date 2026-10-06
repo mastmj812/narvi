@@ -103,8 +103,9 @@ class InventoryRequest(BaseModel):
     # — offset wells a mile out just clutter it (user feedback, bro_time 1 4-9).
     # Context wells never persist or export.
     context_radius_ft: float | None = None
-    # deal depth window (ft TVD from surface) — the ENGINEER'S correlated number,
-    # never parsed from the land file. Benches outside come back flagged
+    # deal depth window (ft TVD from surface) — the engineer's working window
+    # (the client prefills it from plain-number declared land-file depths,
+    # flagged uncorrelated until edited). Benches outside come back flagged
     # (depth_allowed=False), never removed.
     min_depth_ft: float | None = None
     max_depth_ft: float | None = None
