@@ -133,6 +133,13 @@ class InventoryWell:
     # pass-through wells — stable across quarterly reloads (append-only
     # stick_id_map). None for generated wells and PDP producers.
     stick_id: int | None = None
+    # Nearest co-extent PDP producer in 3-D (proximity.apply_pdp_standoff): the
+    # frac-hit check against existing parents. None = not checked / no PDP runs
+    # alongside. Persists via `detail`.
+    pdp_gap_ft: float | None = None
+    pdp_gap_horiz_ft: float | None = None
+    pdp_gap_dtvd_ft: float | None = None
+    pdp_gap_well: str | None = None            # PDP api10
     # Representative novi_intel set for the TC-vs-Novi ML comparison
     # (warehouse.apply_novi_rep, filled at scenario save; anduin reads it from
     # `detail`). mode 'self' = the well IS a novi stick, compare against its own
@@ -165,6 +172,19 @@ class Zone:
     formation: str          # formation_blueox code
     target_tvd_ft: float    # median landing TVD (parameter for now; warehouse later)
     spacing_ft: float | None = None   # per-bench leg-to-leg; None -> use the base spacing
+    # per-bench 'single' | 'uturn'; None -> the deal's ScenarioParams.well_type. Lets a
+    # stack mix U-turn benches with straight sticks (Vault S2: U-turn BS1_S/BS3_C + a
+    # single WCA_1 kept off the University 45 20 1H). The U-turn floor still gates.
+    well_type: str | None = None
+    # per-bench MANUAL cross-section position (ft, gunbarrel frame: +offset = the
+    # right of the folded azimuth — compass EAST for N-S laterals). Pins a row of this
+    # bench exactly there (others follow at +/- k*spacing inside the window). A pinned
+    # bench is the engineer's placement: it skips the depth stagger and is left out of
+    # the deal anchor / slack-shift search, so it neither moves nor moves the others.
+    offset_ft: float | None = None
+    # per-bench min lateral (ft completed); None -> the deal's. A deal tuned for
+    # U-turns (7,000 ft on Vault S2) would otherwise cut every 1-mile single stick.
+    min_lateral_ft: float | None = None
 
 
 @dataclass

@@ -518,3 +518,100 @@ def test_wine_rack_slack_shift_avoids_boundary_clipped_stick():
     # stipulated center anchor: no shift (design intent respected)
     _, _, rep_c = generate_wine_rack(parcel, replace(base, anchor="center"), zones)
     assert "slack-shifted" not in rep_c.note
+
+
+def test_wine_rack_mixes_uturn_and_single_benches():
+    # Vault S2 (2026-10-05): U-turn BS1_S/BS3_C with a straight WCA_1 stick under
+    # them. The bench override places singles in WCA_1 only; the U-turn benches and
+    # the deal turn end are unaffected, and the report calls the stack mixed.
+    parcel = _rect_parcel(5280, 2640)              # E-W half-section
+    base = _params(well_type="uturn", spacing_ft=1320, setback_ft=330,
+                   azimuth_deg=90.0, anchor="auto", min_lateral_ft=4000)
+    zones = [Zone("BS1_S", 9795, spacing_ft=1320.0),
+             Zone("BS3_C", 11136, spacing_ft=1320.0),
+             Zone("WCA_1", 11800, spacing_ft=1320.0, well_type="single")]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+    by = {}
+    for w in wells:
+        by.setdefault(w.formation, []).append(w)
+    assert all(w.well_type == "uturn" and len(w.legs) == 2 for f in ("BS1_S", "BS3_C")
+               for w in by[f])
+    assert by["WCA_1"] and all(
+        w.well_type == "single" and len(w.legs) == 1 and w.turn is None for w in by["WCA_1"])
+    assert "mixed" in rep.note and "floor" not in rep.note
+    # same U-turn geometry as the all-U-turn stack: the single bench doesn't move them
+    ref, _, _ = generate_wine_rack(parcel, base, zones[:2])
+    leg_x = lambda ws: sorted(round(l.gunbarrel_x_ft) for w in ws for l in w.legs)  # noqa: E731
+    assert leg_x([w for w in wells if w.formation != "WCA_1"]) == leg_x(ref)
+
+
+def test_wine_rack_uturn_bench_override_on_single_deal():
+    # inverse: deal default single, one bench overridden to U-turn
+    parcel = _rect_parcel(5280, 2640)
+    base = _params(well_type="single", spacing_ft=1320, setback_ft=330,
+                   azimuth_deg=90.0, anchor="auto", min_lateral_ft=4000)
+    zones = [Zone("BS1_S", 9795, spacing_ft=1320.0, well_type="uturn"),
+             Zone("WCA_1", 11800, spacing_ft=1320.0)]
+    wells, _, rep = generate_wine_rack(parcel, base, zones)
+    assert {w.well_type for w in wells if w.formation == "BS1_S"} == {"uturn"}
+    assert {w.well_type for w in wells if w.formation == "WCA_1"} == {"single"}
+    # the U-turn floor still gates an overridden bench (880 < 990 -> singles, flagged)
+    wells2, _, rep2 = generate_wine_rack(parcel, base, [
+        Zone("BS1_S", 9795, spacing_ft=880.0, well_type="uturn")])
+    assert all(w.well_type == "single" for w in wells2)
+    assert "BS1_S 880" in rep2.note
+
+
+def test_pinned_bench_lands_exactly_at_offset():
+    # A manual per-bench offset puts a row exactly at that gunbarrel position
+    # (others at +/- k*spacing), at a grid azimuth and at an oblique one (the
+    # rotated-frame <-> gunbarrel sign/origin mapping is the thing under test).
+    for az, target in ((90.0, -660.0), (71.3, -660.0), (30.0, 410.0), (0.0, 250.0)):
+        parcel = _rect_parcel(5280, 2640) if az != 0.0 else synthetic_section()
+        base = _params(well_type="single", spacing_ft=1320, setback_ft=330,
+                       azimuth_deg=az, anchor="auto", min_lateral_ft=1000)
+        wells, _, rep = generate_wine_rack(parcel, base, [
+            Zone("WCA_1", 11800, spacing_ft=1320.0, offset_ft=target)])
+        xs = sorted(l.gunbarrel_x_ft for w in wells for l in w.legs)
+        assert xs, az
+        assert min(abs(x - target) for x in xs) < 1.0, (az, xs)
+        assert all(abs(((x - target) / 1320.0) - round((x - target) / 1320.0)) < 1e-3
+                   for x in xs), (az, xs)
+        assert f"WCA_1 at {target:+.0f} ft" in rep.note
+
+
+def test_pinned_bench_does_not_move_the_others():
+    # Vault S2: U-turn BS1_S/BS3_C + a single WCA_1 pinned away from the 1H. The
+    # pinned bench is out of the anchor/slack-shift search and keeps the others'
+    # depth-alternation index — so the U-turn benches place exactly as without it,
+    # whether the pinned bench is the deepest or the shallowest.
+    parcel = _rect_parcel(5280, 2640)
+    # rows parallel to the long side (the oblique mapping is covered above; an
+    # oblique row across this axis-aligned box is a sub-min-lateral chord)
+    base = _params(well_type="uturn", spacing_ft=1320, setback_ft=330,
+                   azimuth_deg=90.0, anchor="auto", min_lateral_ft=4000)
+    us = [Zone("BS1_S", 9795, spacing_ft=1320.0), Zone("BS3_C", 11136, spacing_ft=1320.0)]
+    ref, _, _ = generate_wine_rack(parcel, base, us)
+    leg_x = lambda ws: sorted(round(l.gunbarrel_x_ft) for w in ws for l in w.legs)  # noqa: E731
+    for pin_tvd in (11800.0, 9000.0):
+        pin = Zone("WCA_1", pin_tvd, spacing_ft=1320.0, well_type="single", offset_ft=-660.0)
+        wells, _, _ = generate_wine_rack(parcel, base, us + [pin])
+        assert leg_x([w for w in wells if w.formation != "WCA_1"]) == leg_x(ref), pin_tvd
+        assert any(abs(l.gunbarrel_x_ft + 660) < 1.0
+                   for w in wells if w.formation == "WCA_1" for l in w.legs)
+
+
+def test_bench_min_lateral_override_keeps_single_sticks():
+    # a U-turn-tuned deal min lateral (7,000 ft) cuts every 1-mile single; the
+    # bench's own min lateral lets the pinned single place while U-turns still gate
+    parcel = _rect_parcel(5280, 2640)
+    base = _params(well_type="uturn", spacing_ft=1320, setback_ft=330,
+                   azimuth_deg=90.0, anchor="auto", min_lateral_ft=7000)
+    pin = dict(spacing_ft=1320.0, well_type="single", offset_ft=-660.0)
+    cut, _, rep = generate_wine_rack(parcel, base, [Zone("WCA_1", 11800, **pin)])
+    assert not cut and "min lateral dropped" in rep.note
+    kept, _, _ = generate_wine_rack(parcel, base, [
+        Zone("BS1_S", 9795, spacing_ft=1320.0),
+        Zone("WCA_1", 11800, min_lateral_ft=4000.0, **pin)])
+    assert any(w.formation == "WCA_1" for w in kept)
+    assert all(w.completed_lateral_ft >= 7000 for w in kept if w.formation == "BS1_S")

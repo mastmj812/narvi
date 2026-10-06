@@ -28,7 +28,7 @@ export interface GenerateRequest {
   parcel: GeoJSON.Geometry;
   params: Params;
   mode: Mode;
-  zones?: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[] | null;
+  zones?: ZoneSpec[] | null;
   formations?: string[] | null;
   source_tvd?: boolean;
   source_azimuth?: boolean;
@@ -46,6 +46,22 @@ export interface GenerateRequest {
 // toggles PUD/UPSIDE; existing producers are PDP, fixed)
 export type HandoffCategory = "PDP" | "PUD" | "UPSIDE";
 
+// Per-bench generator overrides (null/absent -> the deal-level params).
+export interface BenchOpts {
+  well_type?: WellType | null;     // single | uturn
+  offset_ft?: number | null;       // pin a row at this gunbarrel offset (ft)
+  min_lateral_ft?: number | null;  // bench min lateral (ft completed)
+}
+
+export interface ZoneSpec extends BenchOpts {
+  formation: string;
+  target_tvd_ft: number;
+  spacing_ft?: number | null;
+}
+
+// Frac-hit flag distance (3-D ft) — mirror of narvi.proximity.DEFAULT_PDP_STANDOFF_FT.
+export const PDP_STANDOFF_FT = 660;
+
 export interface GunbarrelData {
   formations: { formation: string; color: string }[];
   points: {
@@ -55,6 +71,8 @@ export interface GunbarrelData {
     inflation_ratio: number | null;
     handoff_category?: HandoffCategory | null;  // auto classification (server-side)
     context?: boolean;               // near-parcel PDP background (not unit inventory)
+    // nearest co-extent PDP in 3-D (narvi.proximity) — planned wells only
+    pdp_gap_ft?: number | null; pdp_gap_well?: string | null;
     offset_ft: number; tvd_ft: number;
   }[];
   links: {
@@ -159,7 +177,7 @@ export interface ComposedSummary {
   category_overrides?: Record<string, "PUD" | "UPSIDE">;
   generate?: {
     params?: Record<string, unknown>;
-    zones?: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
+    zones?: ZoneSpec[];
     source_azimuth?: boolean;
     buffer_ft?: number;
   };
@@ -189,7 +207,7 @@ export interface SaveComposedBody {
   culled_wells: string[];
   category_overrides: Record<string, "PUD" | "UPSIDE">;
   params: Params;
-  zones: { formation: string; target_tvd_ft: number; spacing_ft?: number | null }[];
+  zones: ZoneSpec[];
   source_azimuth: boolean;
   deal_terms?: DealTerms;
   // acknowledge dropping persisted PUD/UPSIDE overrides (409 override_drop

@@ -79,6 +79,15 @@ def _turn_ewkt(well: InventoryWell) -> str | None:
     return f"SRID=4326;LINESTRING({pts})"
 
 
+def header_well_type(params: ScenarioParams, wells: list[InventoryWell]) -> str:
+    """Scenario header well_type: 'mixed' when the PLANNED wells include both
+    single and U-turn (per-bench overrides, or a U-turn bench floored to singles),
+    else the deal's own type. Per-well rows always carry their own type; the
+    header is a display label downstream (anduin lists it, never branches on it)."""
+    kinds = {w.well_type for w in wells if w.category == "generated"}
+    return "mixed" if len(kinds) > 1 else params.well_type
+
+
 def save_scenario(
     conn: psycopg.Connection,
     deal_id: str,
@@ -108,7 +117,7 @@ def save_scenario(
     total_legs = sum(len(w.legs) for w in wells)
     header = {
         "deal_id": deal_id, "scenario_id": scenario_id, "name": name,
-        "well_type": params.well_type, "objective": params.objective,
+        "well_type": header_well_type(params, wells), "objective": params.objective,
         "spacing_ft": params.spacing_ft, "setback_ft": params.setback_ft,
         "setback_ns_ft": params.setback_ns_ft, "setback_ew_ft": params.setback_ew_ft,
         "azimuth_deg": resolved_az, "min_lateral_ft": params.min_lateral_ft,
@@ -239,6 +248,11 @@ def _well_from_detail(detail: dict) -> InventoryWell:
         # from `detail`; see warehouse.apply_novi_rep)
         stick_id=detail.get("stick_id"),
         novi_rep=detail.get("novi_rep"),
+        # PDP standoff (frac-hit) annotation — absent on pre-check saves
+        pdp_gap_ft=detail.get("pdp_gap_ft"),
+        pdp_gap_horiz_ft=detail.get("pdp_gap_horiz_ft"),
+        pdp_gap_dtvd_ft=detail.get("pdp_gap_dtvd_ft"),
+        pdp_gap_well=detail.get("pdp_gap_well"),
     )
 
 

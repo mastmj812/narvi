@@ -28,7 +28,7 @@ from narvi.warehouse import (
 )
 
 from ..deps import get_conn
-from ..engine import run_generate
+from ..engine import check_pdp_standoff, run_generate
 from ..models import (
     GenerateRequest, SaveComposedRequest, SaveCurateRequest, SaveScenarioRequest,
     ScenarioSummary,
@@ -298,6 +298,9 @@ def prepare_composed(
                          req.category_overrides, wells, req.force)
     _classify_for_handoff(conn, wells, req.category_overrides)
     apply_novi_rep(conn, wells)
+    # frac-hit check on what actually persists (after culls): the pdp_gap_*
+    # annotation rides each well's detail, the flags ride warehouse_notes
+    notes = list(notes) + check_pdp_standoff(conn, parcel, wells)
     # after culls + overrides (both key on the short generated names): persisted
     # names carry the scenario label so merged-scenario consumers stay unique
     qualify_planned_names(wells, req.name or req.deal_id)

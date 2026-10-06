@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS narvi.scenario (
     deal_id                  TEXT NOT NULL,
     scenario_id              TEXT NOT NULL,
     name                     TEXT,
-    well_type                TEXT NOT NULL,             -- 'single' | 'uturn'
+    well_type                TEXT NOT NULL,             -- 'single' | 'uturn' | 'mixed' (per-bench types)
     objective                TEXT NOT NULL,             -- 'max_lateral' | 'max_count'
     spacing_ft               DOUBLE PRECISION,
     setback_ft               DOUBLE PRECISION,

@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { type Category, type Params } from "../api/client";
+import { PDP_STANDOFF_FT, type Category, type Params, type WellType } from "../api/client";
 import { colorForBlueox } from "../map/formations";
 import {
   benchRows, composeGunbarrel, dealIdFor, genStale, useStore, zonesForGenerate,
@@ -42,11 +42,11 @@ export function PlanPanel() {
   const s = useStore();
   const {
     parcel, parcels, scenarios, inventory, benchSource, cats, culledWells,
-    params, sourceAzimuth, benchSpacing, benchTvd, result, loading, error,
+    params, sourceAzimuth, benchSpacing, benchTvd, benchOpts, result, loading, error,
     feasibility, scan, scanning, runScan, adoptConfig,
     categoryOverrides, toggleCategoryOverride,
     selectParcel, renameParcel, loadSynthetic, uploadParcels, fetchInventory, setBenchSource,
-    toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, generate,
+    toggleCat, setParam, setSourceAzimuth, setBenchSpacing, setBenchTvd, setBenchOpt, generate,
     setDepthWindow,
   } = s;
 
@@ -75,6 +75,22 @@ export function PlanPanel() {
     .filter((p) => p.category === "pdp").map((p) => p.well_name)).size;
 
   const savedDeals = new Set(scenarios.map((sc) => sc.deal_id));
+
+  // PDP standoff flags per bench: generated wells (not culled) whose nearest
+  // co-extent producer is inside the 3-D standoff — one line per well
+  const culledSet = new Set(culledWells);
+  const standoffByBench = new Map<string, string[]>();
+  const seenWells = new Set<string>();
+  for (const p of result?.gunbarrel?.points ?? []) {
+    if (p.category !== "generated" || culledSet.has(p.well_name) || seenWells.has(p.well_name)) continue;
+    seenWells.add(p.well_name);
+    if (p.pdp_gap_ft != null && p.pdp_gap_ft < PDP_STANDOFF_FT) {
+      const l = standoffByBench.get(p.formation) ?? [];
+      l.push(`${p.well_name} ${Math.round(p.pdp_gap_ft)} ft from PDP ${p.pdp_gap_well ?? "?"}`);
+      standoffByBench.set(p.formation, l);
+    }
+  }
+  const dealType = params.well_type === "uturn" ? "U-turn" : "single";
 
   return (
     <>
@@ -269,6 +285,7 @@ export function PlanPanel() {
               ? `${b.n_supported}/${b.n_pud + b.n_res} supp` : null,
           ].filter(Boolean).join(" · ") || "no control";
           const sp = benchSpacing[b.formation] ?? b.suggested_spacing_ft ?? params.spacing_ft;
+          const opts = benchOpts[b.formation] ?? {};
           return (
             <div key={b.formation}
               style={{ marginBottom: 4, opacity: src === "off" ? (flagged ? 0.45 : 0.55) : 1 }}>
@@ -341,6 +358,45 @@ export function PlanPanel() {
                       onChange={(e) => setBenchTvd(b.formation,
                         e.target.value === "" ? null : Number(e.target.value))} />
                   </div>
+                  <div className="field" style={{ paddingLeft: 12 }}>
+                    <label style={{ color: opts.well_type ? "var(--accent)" : "var(--muted)", fontSize: 11 }}
+                      title="this bench's well type — e.g. a straight stick under U-turn benches where a turn would cross an existing producer. The U-turn floor still applies.">
+                      well type
+                    </label>
+                    <select style={{ width: 104 }} value={opts.well_type ?? ""}
+                      onChange={(e) => setBenchOpt(b.formation,
+                        { well_type: (e.target.value || null) as WellType | null })}>
+                      <option value="">deal ({dealType})</option>
+                      <option value="single">single</option>
+                      <option value="uturn">U-turn</option>
+                    </select>
+                  </div>
+                  <div className="field" style={{ paddingLeft: 12 }}>
+                    <label style={{ color: opts.offset_ft != null ? "var(--accent)" : "var(--muted)", fontSize: 11 }}
+                      title="pin a row of this bench at this gun-barrel offset (ft; + = the chart's right end — east for N-S laterals, south for E-W). Further rows follow at ± the bench spacing; cull any you don't want. A pinned bench skips the depth stagger and the auto anchor, and never moves the other benches. Empty = auto.">
+                      pin offset (ft)
+                    </label>
+                    <input type="number" step={10} style={{ width: 80 }}
+                      value={opts.offset_ft ?? ""} placeholder="auto"
+                      onChange={(e) => setBenchOpt(b.formation,
+                        { offset_ft: e.target.value === "" ? null : Number(e.target.value) })} />
+                  </div>
+                  <div className="field" style={{ paddingLeft: 12 }}>
+                    <label style={{ color: opts.min_lateral_ft != null ? "var(--accent)" : "var(--muted)", fontSize: 11 }}
+                      title="min completed lateral for this bench — a deal minimum tuned for U-turns (e.g. 7,000 ft) cuts every 1-mile single stick. Empty = the deal's.">
+                      min lateral (ft)
+                    </label>
+                    <input type="number" step={100} style={{ width: 80 }}
+                      value={opts.min_lateral_ft ?? ""} placeholder={String(params.min_lateral_ft)}
+                      onChange={(e) => setBenchOpt(b.formation,
+                        { min_lateral_ft: e.target.value === "" ? null : Number(e.target.value) })} />
+                  </div>
+                  {(standoffByBench.get(b.formation) ?? []).map((t) => (
+                    <div key={t} className="note" style={{ color: "#b91c1c", paddingLeft: 12, marginTop: 0 }}
+                      title={`3-D gap to the nearest producer running alongside (co-extent) — under ${PDP_STANDOFF_FT} ft is a frac-hit risk. Warning only.`}>
+                      ⚠ {t}
+                    </div>
+                  ))}
                 </>
               )}
             </div>

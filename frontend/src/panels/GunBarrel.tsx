@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { GunbarrelData } from "../api/client";
+import { PDP_STANDOFF_FT, type GunbarrelData } from "../api/client";
 import { colorForBlueox, colorForSupport, SUPPORT_LEGEND } from "../map/formations";
 import { composeGunbarrel, useStore } from "../store";
 
@@ -49,9 +49,15 @@ function Marker({ p, eff, cx, cy, color, on, onToggle }: {
   const shape = eff === "UPSIDE"
     ? <polygon points={starPoints(cx, cy, r + 2)} {...paint} {...h} />
     : <circle cx={cx} cy={cy} r={r} {...paint} {...h} />;
+  // planned well inside the PDP standoff: red dashed ring (frac-hit warning)
+  const nearPdp = p.category !== "pdp" && p.pdp_gap_ft != null && p.pdp_gap_ft < PDP_STANDOFF_FT;
   return (
     <g>
       <circle cx={cx} cy={cy} r={r + 4} fill="transparent" {...h} />
+      {nearPdp && (
+        <circle cx={cx} cy={cy} r={r + 4} fill="none" stroke="#dc2626"
+          strokeWidth={1.2} strokeDasharray="2 1.5" pointerEvents="none" />
+      )}
       {shape}
     </g>
   );
@@ -83,6 +89,9 @@ function Tooltip({ p, x, y, handoff }: { p: Pt; x: number; y: number; handoff?: 
           {(p.category === "pud" || p.category === "res") && p.inflation_ratio != null
             ? row("EUR/ft vs offsets", `${p.inflation_ratio.toFixed(2)}×`) : null}
           {handoff ? row("Handoff", handoff) : null}
+          {p.category !== "pdp" && p.pdp_gap_ft != null
+            ? row("Nearest PDP", `${Math.round(p.pdp_gap_ft).toLocaleString()} ft 3-D · ${p.pdp_gap_well ?? "?"}`
+              + (p.pdp_gap_ft < PDP_STANDOFF_FT ? " ⚠ frac-hit risk" : "")) : null}
         </tbody>
       </table>
     </div>
@@ -270,6 +279,9 @@ export function GunBarrel() {
         <span>● PDP</span><span>○ PUD</span><span>✶ UPSIDE</span>
         <span>· color = {supportColor ? "PDP support (offsets @3mi)" : "bench"}</span>
         <span style={{ color: "#a1a1aa" }}>· click = cull · ⇧-click = PUD/UPSIDE</span>
+        {gb.points.some((p) => p.category !== "pdp" && p.pdp_gap_ft != null && p.pdp_gap_ft < PDP_STANDOFF_FT) && (
+          <span style={{ color: "#dc2626" }}>· red ring = within {PDP_STANDOFF_FT} ft (3-D) of a PDP</span>
+        )}
         {hasFaded && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
         {hiddenPdp > 0 && (
           <span style={{ color: "#a1a1aa" }}>· {hiddenPdp} PDP hidden — click its stick on the map to restore</span>
