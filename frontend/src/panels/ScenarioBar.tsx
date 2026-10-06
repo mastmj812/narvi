@@ -7,8 +7,9 @@ import {
 import { api, type ScenarioSummary } from "../api/client";
 
 export function ScenarioBar() {
-  const { scenarios, parcel, result, inventory, culledWells, loaded,
+  const { scenarios, parcel, result, inventory, culledWells, loaded, saveStatus,
     refreshScenarios, save, load, remove, toggleCull, restoreAllCulled } = useStore();
+  const saving = saveStatus.state === "saving";
   const [name, setName] = useState("");
   // deal bundle: ad-hoc multi-select of saved scenarios -> one CSV + one GeoJSON,
   // each record tagged with its source scenario name (the DSU/section label).
@@ -146,8 +147,25 @@ export function ScenarioBar() {
           onChange={(e) => setName(e.target.value)}
           style={{ flex: 2, padding: "4px 6px", border: "1px solid var(--line)", borderRadius: 5 }}
         />
-        <button className="ghost" disabled={!canSave} onClick={doSave}>Save</button>
+        <button className="ghost" disabled={!canSave || saving} onClick={doSave}>
+          {saving ? "Saving…" : "Save"}
+        </button>
       </div>
+      {saveStatus.state !== "idle" && (
+        <div
+          key={saveStatus.at ?? "pending"}
+          className={`save-status ${saveStatus.state}`}
+          title={saveStatus.state === "error" ? saveStatus.msg : undefined}
+        >
+          {saveStatus.state === "saving" && "saving — regenerating + persisting…"}
+          {saveStatus.state === "saved" && (
+            <>✓ saved {loaded?.name ?? ""} · {saveStatus.msg} · {
+              new Date(saveStatus.at ?? 0).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })
+            }</>
+          )}
+          {saveStatus.state === "error" && `✗ save failed — ${saveStatus.msg}`}
+        </div>
+      )}
 
       <div className="row" style={{ marginTop: 6, alignItems: "center" }}>
         <button className="ghost" disabled={!canExport} onClick={() => doExport("geojson")}>⬇ GeoJSON</button>
@@ -235,9 +253,12 @@ export function ScenarioBar() {
         {visible.map((s) => {
           const key = `${s.deal_id}/${s.scenario_id}`;
           const isLoaded = loaded?.deal_id === s.deal_id && loaded?.scenario_id === s.scenario_id;
+          const justSaved = isLoaded && saveStatus.state === "saved";
           return (
             <div
-              className="scenario-row" key={key}
+              className={justSaved ? "scenario-row just-saved" : "scenario-row"}
+              // re-keyed per save so the flash replays even when the row didn't move
+              key={justSaved ? `${key}@${saveStatus.at}` : key}
               style={isLoaded
                 ? { background: "var(--accent-soft, #eef2ff)", borderRadius: 5, padding: "2px 4px" }
                 : undefined}

@@ -109,15 +109,18 @@ export interface ParcelInfo {
   depthWindow?: DepthWindow;
 }
 
-// The engineer's working depth window — typed after log correlation, NEVER
-// parsed from the land file (declared depths are often stratigraphic
-// equivalents of a reference log miles away; Toucan: 9,515' declared vs
-// ~9,950' correlated). Soft: out-of-window benches flag + seed off, stay
-// selectable.
+// The engineer's working depth window. PREFILLED from the land file's declared
+// DSU depths when they parse as plain numbers ("Surface" / "11,950'"), so bench
+// selection defaults sensibly on load — but declared depths are often
+// stratigraphic equivalents of a reference log miles away (Toucan: 9,515'
+// declared vs ~9,950' correlated), so a prefilled window is flagged
+// `fromDeclared` until the engineer edits it. Soft: out-of-window benches flag
+// + seed off, stay selectable.
 export interface DepthWindow {
   minFt: number | null;
   maxFt: number | null;
   basis: string;                   // provenance, e.g. "correlated by RG, ref log 17 mi NW"
+  fromDeclared?: boolean;          // client-only: prefilled from the land file, not yet edited
 }
 
 export interface BenchInfo {
