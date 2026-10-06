@@ -8,6 +8,7 @@ import {
   type GenerateRequest,
   type GenerateResponse,
   type BenchInfo,
+  type BenchOpts,
   type GunbarrelData,
   type InventoryResponse,
   type DirectionFeasibility,
@@ -19,6 +20,7 @@ import {
   type ParcelInfo,
   type ScanConfig,
   type ScenarioSummary,
+  type ZoneSpec,
 } from "./api/client";
 
 // Per-bench inventory source — the core of the unified (no curate/override
@@ -172,20 +174,37 @@ function seedBenchSources(
 // The generator zones implied by the bench table: every generate-sourced bench,
 // TVD/spacing resolved hard-override -> bench control -> deal-level default.
 export function zonesForGenerate(
-  s: Pick<State, "benches" | "devBenches" | "benchSource" | "benchTvd" | "benchSpacing" | "params" | "parcel">,
-): { formation: string; target_tvd_ft: number; spacing_ft: number }[] {
+  s: Pick<State, "benches" | "devBenches" | "benchSource" | "benchTvd" | "benchSpacing"
+    | "benchOpts" | "params" | "parcel">,
+): ZoneSpec[] {
   return benchRows(s)
     .filter((r) => s.benchSource[r.formation] === "generate")
     .map((r) => ({
       formation: r.formation,
       target_tvd_ft: s.benchTvd[r.formation] ?? r.median_tvd_ft ?? s.params.target_tvd_ft,
       spacing_ft: s.benchSpacing[r.formation] ?? r.suggested_spacing_ft ?? s.params.spacing_ft,
+      // per-bench overrides ride only when set, so a plan without them builds
+      // byte-identical requests (staleness keys on the request JSON)
+      ...s.benchOpts[r.formation],
     }));
+}
+
+// The per-bench overrides a saved zone list carries (absent/null keys dropped).
+function benchOptsFromZones(zones: ZoneSpec[]): Record<string, BenchOpts> {
+  const out: Record<string, BenchOpts> = {};
+  for (const z of zones) {
+    const o: BenchOpts = {};
+    if (z.well_type) o.well_type = z.well_type;
+    if (z.offset_ft != null) o.offset_ft = z.offset_ft;
+    if (z.min_lateral_ft != null) o.min_lateral_ft = z.min_lateral_ft;
+    if (Object.keys(o).length) out[z.formation] = o;
+  }
+  return out;
 }
 
 export function buildRequestFrom(
   s: Pick<State, "parcel" | "params" | "sourceAzimuth" | "benches" | "devBenches"
-    | "benchSource" | "benchTvd" | "benchSpacing">,
+    | "benchSource" | "benchTvd" | "benchSpacing" | "benchOpts">,
 ): GenerateRequest | null {
   if (!s.parcel) return null;
   const zones = zonesForGenerate(s);
@@ -352,6 +371,10 @@ interface State {
   // trumps the warehouse median (novi_intel WCB_2 TVDs can run deep / mis-tagged;
   // the geologist's number wins). Structural, so it resets on parcel change.
   benchTvd: Record<string, number>;
+  // per-bench generator overrides (formation -> well type / pinned offset /
+  // min lateral); absent = the deal-level params. Mixes U-turn and single
+  // benches in one stack (Vault S2). Structural: resets on parcel change.
+  benchOpts: Record<string, BenchOpts>;
   result: GenerateResponse | null;
   lastGenKey: string | null;       // JSON of the request behind `result` (staleness)
   // identity of the loaded / last-saved scenario — drives the "loaded" marker in
@@ -402,6 +425,8 @@ interface State {
   setSourceAzimuth: (v: boolean) => void;
   setBenchSpacing: (f: string, v: number) => void;
   setBenchTvd: (f: string, v: number | null) => void;   // null/NaN clears the override
+  // patch one bench's overrides; a null/NaN/"" value clears that key
+  setBenchOpt: (f: string, patch: Partial<BenchOpts>) => void;
   buildRequest: () => GenerateRequest | null;
   generate: () => Promise<void>;
 
@@ -422,6 +447,7 @@ const PARCEL_RESET = {
   result: null, inventory: null, benches: [] as BenchInfo[], devBenches: [] as BenchInfo[],
   benchSource: {} as Record<string, BenchSource>, benchSpacing: {} as Record<string, number>,
   benchTvd: {} as Record<string, number>, culledWells: [] as string[],
+  benchOpts: {} as Record<string, BenchOpts>,
   feasibility: null, scan: null, scanning: false,
   categoryOverrides: {} as Record<string, "PUD" | "UPSIDE">,
   lastGenKey: null, loaded: null, error: null,
@@ -446,6 +472,7 @@ export const useStore = create<State>((set, get) => ({
   sourceAzimuth: true,
   benchSpacing: {},
   benchTvd: {},
+  benchOpts: {},
   result: null,
   lastGenKey: null,
   loaded: null,
@@ -609,6 +636,17 @@ export const useStore = create<State>((set, get) => ({
     return { benchTvd };
   }),
 
+  setBenchOpt: (f, patch) => set((s) => {
+    const cur: BenchOpts = { ...s.benchOpts[f] };
+    for (const [k, v] of Object.entries(patch) as [keyof BenchOpts, unknown][]) {
+      if (v == null || v === "" || (typeof v === "number" && !Number.isFinite(v))) delete cur[k];
+      else (cur as Record<string, unknown>)[k] = v;
+    }
+    const benchOpts = { ...s.benchOpts };
+    if (Object.keys(cur).length) benchOpts[f] = cur; else delete benchOpts[f];
+    return { benchOpts };
+  }),
+
   buildRequest: () => buildRequestFrom(get()),
 
   generate: async () => {
@@ -747,6 +785,7 @@ export const useStore = create<State>((set, get) => ({
           benchTvd: Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft])),
           benchSpacing: Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
             .map((z) => [z.formation, z.spacing_ft as number])),
+          benchOpts: benchOptsFromZones(zones),
         });
         await get().fetchInventory({ seed: false });
         set({
@@ -826,6 +865,7 @@ export const useStore = create<State>((set, get) => ({
           ? Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
               .map((z) => [z.formation, z.spacing_ft as number]))
           : (params.formation ? { [params.formation]: params.spacing_ft } : {}),
+        benchOpts: benchOptsFromZones(zones),
         culledWells: [],
         lastGenKey: null,
         loaded: { deal_id, scenario_id, name: meta?.name ?? null },
