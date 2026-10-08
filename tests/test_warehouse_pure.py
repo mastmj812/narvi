@@ -161,9 +161,9 @@ def test_resolve_baseline_azimuth_planned_over_existing():
 
 
 def test_project_gunbarrel_frame():
-    # cross_axis(0) points EAST (+offset), cross_axis(90) points SOUTH.
+    # cross_axis(0) points EAST (+offset), cross_axis(90) points NORTH (rule v2).
     w = _leg_well("w", "pdp", (100.0, 0.0), (100.0, 1000.0))[0]  # N-S leg at x=100 m
     project_gunbarrel([w], 0.0, (0.0, 0.0))
     assert abs(w.legs[0].gunbarrel_x_ft - 100.0 * FT_PER_M) < 0.1
-    project_gunbarrel([w], 90.0, (0.0, 0.0))                     # mid y=500 -> south is -
-    assert abs(w.legs[0].gunbarrel_x_ft - (-500.0 * FT_PER_M)) < 0.1
+    project_gunbarrel([w], 90.0, (0.0, 0.0))                     # mid y=500 -> north is +
+    assert abs(w.legs[0].gunbarrel_x_ft - (500.0 * FT_PER_M)) < 0.1

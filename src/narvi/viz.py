@@ -141,7 +141,8 @@ def gunbarrel_data(wells: list[InventoryWell]) -> dict:
     point at (cross-section offset_ft, target TVD); a U-turn's two legs are joined
     by a link at their TVD. `formations` is shallow->deep with palette colors so a
     chart can build a bench legend. `azimuth_deg` lets the chart label the axis
-    ends with compass directions (+offset = cross_axis of the folded azimuth)."""
+    ends with compass directions (+offset = placement.cross_axis: W -> E for N-S
+    laterals, S -> N for E-W)."""
     colors = formation_colors(wells)
     points, links = [], []
     for w in wells:

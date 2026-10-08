@@ -254,15 +254,37 @@ def unrotate(x: float, y: float, centroid: Point, phi: float) -> tuple[float, fl
     return (p.x, p.y)
 
 
+# Gunbarrel sign rule v2 (Michael, 2026-10-08; workspace rule 16): the
+# cross-section reads W -> E for N-S-ish laterals and S -> N for E-W-ish ones.
+# + always points into the NE half (bearings in (-45, 135]); the one seam sits
+# at a 45° lateral, where + = SE. The side is decided on the azimuth rounded to
+# 0.1° — the precision the scenario header (and the drop's dsu_meta) persists —
+# so a consumer recomputing from the stored header lands on the same side.
+# Copies of this rule: anduin exports/blueox.py, erebor _canonical_axis (x3),
+# engineering_db dealintake/geo.py — change every copy or none.
+GUNBARREL_RULE = 2
+_SEAM_DEG = 45.0
+
+
+def plus_offset_bearing_deg(azimuth_deg: float) -> float:
+    """Compass bearing (deg, [0,360)) of the +offset direction for a lateral
+    azimuth. With a = the folded azimuth (side decided on a rounded to 0.1°):
+    a + 90 when a <= 45, else a - 90 — always inside (-45, 135]."""
+    a = azimuth_deg % 180.0
+    if round(a, 1) >= 180.0:      # 179.96 rounds onto the 0° side of the fold
+        a -= 180.0
+    b = a + 90.0 if round(a, 1) <= _SEAM_DEG else a - 90.0
+    return b % 360.0
+
+
 def cross_axis(azimuth_deg: float) -> tuple[float, float]:
-    """THE canonical gun-barrel cross-section axis (unit vector, work-CRS E/N).
-    The azimuth is folded to [0,180) (axial — a lateral has no direction); the
-    axis is 90° clockwise of it, so +offset = the right-hand side looking down
-    the folded azimuth: compass EAST for N-S laterals, compass SOUTH for E-W.
+    """THE canonical gun-barrel cross-section axis (unit vector, work-CRS E/N),
+    perpendicular to the (axial) azimuth and pointing at plus_offset_bearing_deg:
+    compass EAST for N-S laterals, NORTH for E-W, SE for an exact 45° lateral.
     Every gunbarrel_x_ft in narvi (generated wells AND warehouse pass-throughs)
     projects onto this axis so the two populations overlay correctly."""
-    a = math.radians(azimuth_deg % 180.0)
-    return (math.cos(a), -math.sin(a))
+    b = math.radians(plus_offset_bearing_deg(azimuth_deg))
+    return (math.sin(b), math.cos(b))
 
 
 def gunbarrel_offset_ft(
