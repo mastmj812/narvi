@@ -20,6 +20,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 from shapely.geometry.base import BaseGeometry
 
+from .placement import GUNBARREL_RULE
 from .records import InventoryWell, Leg, ScenarioParams, Turn
 from .warehouse import parcel_to_ewkt_4326
 
@@ -111,6 +112,10 @@ def save_scenario(
     baselines). Fallback is wells[0] — correct for pure-generate saves, where
     every well shares the generation azimuth."""
     aoi = parcel_to_ewkt_4326(parcel)
+    # stamp the gunbarrel sign rule the offsets were projected under, so the
+    # one-shot v1 -> v2 sign migration (app.migrate_gb_sign) never re-negates
+    # a scenario saved by v2 code
+    summary = {**(summary or {}), "gunbarrel_rule": GUNBARREL_RULE}
     # the resolved azimuth actually used (params.azimuth_deg may be None when auto)
     resolved_az = (frame_azimuth_deg if frame_azimuth_deg is not None
                    else wells[0].lateral_azimuth_deg if wells else params.azimuth_deg)

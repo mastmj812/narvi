@@ -42,8 +42,8 @@ class ZoneModel(BaseModel):
     target_tvd_ft: float
     spacing_ft: float | None = None        # per-bench leg-to-leg; None -> base spacing
     # per-bench overrides (None -> the deal's params): well type, a MANUAL
-    # gunbarrel position that pins this bench's rows (+ = right of the folded
-    # azimuth, compass east for N-S laterals), and min lateral (ft completed)
+    # gunbarrel position that pins this bench's rows (+ = compass east for N-S
+    # laterals, north for E-W — sign rule v2), and min lateral (ft completed)
     well_type: Literal["single", "uturn"] | None = None
     offset_ft: float | None = None
     min_lateral_ft: float | None = Field(default=None, ge=0)

@@ -62,6 +62,17 @@ export interface ZoneSpec extends BenchOpts {
 // Frac-hit flag distance (3-D ft) — mirror of narvi.proximity.DEFAULT_PDP_STANDOFF_FT.
 export const PDP_STANDOFF_FT = 660;
 
+// Compass bearing of the gunbarrel +offset direction — mirror of
+// narvi.placement.plus_offset_bearing_deg (sign rule v2): with a = the folded
+// lateral azimuth (side decided on a rounded to 0.1°), a + 90 when a <= 45,
+// else a - 90. N-S-ish DSUs read W → E, E-W-ish DSUs read S → N.
+export function plusOffsetBearingDeg(azimuthDeg: number): number {
+  let a = ((azimuthDeg % 180) + 180) % 180;
+  if (Math.round(a * 10) / 10 >= 180) a -= 180;
+  const b = Math.round(a * 10) / 10 <= 45 ? a + 90 : a - 90;
+  return ((b % 360) + 360) % 360;
+}
+
 export interface GunbarrelData {
   formations: { formation: string; color: string }[];
   points: {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { PDP_STANDOFF_FT, type GunbarrelData } from "../api/client";
+import { PDP_STANDOFF_FT, plusOffsetBearingDeg, type GunbarrelData } from "../api/client";
 import { colorForBlueox, colorForSupport, SUPPORT_LEGEND } from "../map/formations";
 import { composeGunbarrel, useStore } from "../store";
 
@@ -161,19 +161,11 @@ export function GunBarrel() {
   };
 
   const W = size.width, H = size.height;
-  // Auto-orientation (suite-wide gunbarrel convention): a ~N-S DSU reads
-  // W → E left-to-right, a ~E-W DSU reads N → S. +offset points 90°
-  // clockwise of the folded azimuth (canonical cross_axis) — WEST-ish once
-  // the folded azimuth passes 135° — so those mirror by default. The ⇋
-  // toggle flips on top of the auto default; persisted offsets untouched.
+  // Orientation: persisted offsets already follow the suite-wide sign rule v2
+  // (placement.cross_axis) — a ~N-S DSU reads W → E left-to-right, a ~E-W DSU
+  // reads S → N — so the chart plots them as stored. The ⇋ toggle mirrors.
   const az = gb.azimuth_deg;
-  let autoFlip = false;
-  if (az != null) {
-    const a = (((az % 180) + 180) % 180) * (Math.PI / 180);
-    const east = Math.cos(a), south = Math.sin(a);
-    autoFlip = Math.abs(east) >= Math.abs(south) ? east < 0 : south < 0;
-  }
-  const effFlip = autoFlip !== gbFlip;
+  const effFlip = gbFlip;
   // flip mirrors the x-axis (scale on the signed values so min/max track the flip)
   const sgn = effFlip ? -1 : 1;
   const xs = gb.points.map((p) => sgn * p.offset_ft), ys = gb.points.map((p) => p.tvd_ft);
@@ -183,10 +175,11 @@ export function GunBarrel() {
   const sx = (x: number) => M.l + (((sgn * x - minX) / spanX) * 0.9 + 0.05) * (W - M.l - M.r);
   const sy = (y: number) => M.t + (((y - minY) / spanY) * 0.9 + 0.05) * (H - M.t - M.b);
 
-  // compass direction of each axis end; the effective flip swaps them.
+  // compass direction of each axis end; the flip swaps them.
   const WINDS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-  const plusDir = az != null ? WINDS[Math.round((((az % 180) + 90) % 360) / 45) % 8] : null;
-  const minusDir = az != null ? WINDS[(Math.round((((az % 180) + 90) % 360) / 45) + 4) % 8] : null;
+  const plusBrg = az != null ? plusOffsetBearingDeg(az) : null;
+  const plusDir = plusBrg != null ? WINDS[Math.round(plusBrg / 45) % 8] : null;
+  const minusDir = plusBrg != null ? WINDS[(Math.round(plusBrg / 45) + 4) % 8] : null;
   const rightLabel = effFlip ? minusDir : plusDir;
   const leftLabel = effFlip ? plusDir : minusDir;
 

@@ -373,7 +373,7 @@ export function PlanPanel() {
                   </div>
                   <div className="field" style={{ paddingLeft: 12 }}>
                     <label style={{ color: opts.offset_ft != null ? "var(--accent)" : "var(--muted)", fontSize: 11 }}
-                      title="pin a row of this bench at this gun-barrel offset (ft; + = the chart's right end — east for N-S laterals, south for E-W). Further rows follow at ± the bench spacing; cull any you don't want. A pinned bench skips the depth stagger and the auto anchor, and never moves the other benches. Empty = auto.">
+                      title="pin a row of this bench at this gun-barrel offset (ft; + = the chart's right end — east for N-S laterals, north for E-W). Further rows follow at ± the bench spacing; cull any you don't want. A pinned bench skips the depth stagger and the auto anchor, and never moves the other benches. Empty = auto.">
                       pin offset (ft)
                     </label>
                     <input type="number" step={10} style={{ width: 80 }}

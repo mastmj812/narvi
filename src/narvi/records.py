@@ -176,9 +176,10 @@ class Zone:
     # stack mix U-turn benches with straight sticks (Vault S2: U-turn BS1_S/BS3_C + a
     # single WCA_1 kept off the University 45 20 1H). The U-turn floor still gates.
     well_type: str | None = None
-    # per-bench MANUAL cross-section position (ft, gunbarrel frame: +offset = the
-    # right of the folded azimuth — compass EAST for N-S laterals). Pins a row of this
-    # bench exactly there (others follow at +/- k*spacing inside the window). A pinned
+    # per-bench MANUAL cross-section position (ft, gunbarrel frame: +offset =
+    # compass EAST for N-S laterals, NORTH for E-W — placement.cross_axis, sign
+    # rule v2). Pins a row of this bench exactly there (others follow at +/-
+    # k*spacing inside the window). A pinned
     # bench is the engineer's placement: it skips the depth stagger and is left out of
     # the deal anchor / slack-shift search, so it neither moves nor moves the others.
     offset_ft: float | None = None
