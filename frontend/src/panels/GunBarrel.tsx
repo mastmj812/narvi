@@ -110,6 +110,7 @@ export function GunBarrel() {
   const gbFlip = useStore((s) => s.gbFlip);
   const toggleGbFlip = useStore((s) => s.toggleGbFlip);
   const supportColor = useStore((s) => s.supportColor);
+  const depthWindow = useStore((s) => s.parcel?.depthWindow);
   const culledSet = useMemo(() => new Set(culledWells), [culledWells]);
 
   // One composed working set (store.composeGunbarrel): Novi-sourced benches from
@@ -174,6 +175,22 @@ export function GunBarrel() {
   const spanX = maxX - minX || 1, spanY = maxY - minY || 1;
   const sx = (x: number) => M.l + (((sgn * x - minX) / spanX) * 0.9 + 0.05) * (W - M.l - M.r);
   const sy = (y: number) => M.t + (((y - minY) / spanY) * 0.9 + 0.05) * (H - M.t - M.b);
+
+  // Deal depth window (parcel.depthWindow): grey out TVD outside [min, max] as a
+  // visual cue only — the window stays a SOFT flag, wells there are still
+  // plannable. Bands clamp to the plot area (y is fit to the points).
+  const yTop = M.t, yBot = H - M.b;
+  const clampY = (v: number) => Math.min(yBot, Math.max(yTop, v));
+  const fmtFt = (v: number) => `${Math.round(v).toLocaleString()} ft`;
+  const depthBands: { y0: number; y1: number; edge: number; label: string }[] = [];
+  if (depthWindow?.minFt != null) {
+    const e = clampY(sy(depthWindow.minFt));
+    if (e > yTop) depthBands.push({ y0: yTop, y1: e, edge: e, label: `min ${fmtFt(depthWindow.minFt)}` });
+  }
+  if (depthWindow?.maxFt != null) {
+    const e = clampY(sy(depthWindow.maxFt));
+    if (e < yBot) depthBands.push({ y0: e, y1: yBot, edge: e, label: `max ${fmtFt(depthWindow.maxFt)}` });
+  }
 
   // compass direction of each axis end; the flip swaps them.
   const WINDS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -243,6 +260,18 @@ export function GunBarrel() {
       </div>
       <div className="win-body" ref={bodyRef}>
         <svg width={W} height={H} style={{ display: "block" }}>
+          {depthBands.map((b) => (
+            <g key={b.label} pointerEvents="none">
+              <rect x={M.l} y={b.y0} width={W - M.l - M.r} height={b.y1 - b.y0} fill="#9ca3af" opacity={0.28} />
+              {b.edge > yTop && b.edge < yBot && (
+                <>
+                  <line x1={M.l} y1={b.edge} x2={W - M.r} y2={b.edge} stroke="#6b7280" strokeDasharray="4 3" />
+                  <text x={W - M.r - 4} y={b.label.startsWith("max") ? b.edge + 10 : b.edge - 3}
+                    textAnchor="end" fontSize={9} fill="#4b5563">{b.label}</text>
+                </>
+              )}
+            </g>
+          ))}
           <line x1={M.l} y1={H - M.b} x2={W - M.r} y2={H - M.b} stroke="#e5e7eb" />
           <line x1={M.l} y1={M.t} x2={M.l} y2={H - M.b} stroke="#e5e7eb" />
           {minX <= 0 && maxX >= 0 && (
@@ -274,6 +303,10 @@ export function GunBarrel() {
         <span style={{ color: "#a1a1aa" }}>· click = cull · ⇧-click = PUD/UPSIDE</span>
         {gb.points.some((p) => p.category !== "pdp" && p.pdp_gap_ft != null && p.pdp_gap_ft < PDP_STANDOFF_FT) && (
           <span style={{ color: "#dc2626" }}>· red ring = within {PDP_STANDOFF_FT} ft (3-D) of a PDP</span>
+        )}
+        {depthBands.length > 0 && (
+          <span style={{ color: "#6b7280" }}>· grey = outside depth window
+            {depthWindow?.fromDeclared ? " (declared, not yet correlated)" : ""}</span>
         )}
         {hasFaded && <span style={{ color: "#a1a1aa" }}>· faded = offset context</span>}
         {hiddenPdp > 0 && (
