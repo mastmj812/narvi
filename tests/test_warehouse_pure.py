@@ -167,3 +167,19 @@ def test_project_gunbarrel_frame():
     assert abs(w.legs[0].gunbarrel_x_ft - 100.0 * FT_PER_M) < 0.1
     project_gunbarrel([w], 90.0, (0.0, 0.0))                     # mid y=500 -> north is +
     assert abs(w.legs[0].gunbarrel_x_ft - (500.0 * FT_PER_M)) < 0.1
+
+
+def test_reconciliation_filters_res_like_pud():
+    """D117 (engineering_db sql/68, 2026-10-21): reconciled_inventory covers every
+    Novi stick, so a realized RES slot is drilled, not inventory — the four stick
+    queries filter PUD and RES alike; other categories still pass through."""
+    import inspect
+
+    import narvi.warehouse as wh
+
+    src = inspect.getsource(wh)
+    assert "il.category = 'RES' OR" not in src
+    assert "il.category <> 'PUD' OR" not in src
+    assert src.count("(il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL") == 4
+    assert "il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL" in wh._STICK_SQL
+    assert "il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL" in wh._NEAREST_STICK_TVD_SQL
