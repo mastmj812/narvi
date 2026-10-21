@@ -574,7 +574,7 @@ _NEAREST_STICK_TVD_SQL = """
           AND ifb.formation_blueox = ANY(%(codes)s)
           AND ST_DWithin(il.wellstick_geom::geography,
                          ST_GeogFromText(%(aoi)s), %(far)s)
-          AND (il.category = 'RES' OR ri.status IS NULL
+          AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
                OR ri.status IN ('remaining_pud', 'conflict'))
     ) s WHERE rn <= %(n)s
 """
@@ -623,7 +623,7 @@ def available_benches(
             for i, fb in enumerate(STRAT_COLUMN[basin])
         }
 
-        # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox. PUDs pass
+        # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox. PUD + RES pass
         # the SAME reconciliation filter as _STICK_SQL (realized ones are already
         # drilled) so the bench menu counts match what the map/gun-barrel shows.
         # Counts only — stick TVDs are the last-resort tier below.
@@ -637,7 +637,7 @@ def available_benches(
               AND ifb.formation_blueox IS NOT NULL
               AND ST_DWithin(il.wellstick_geom::geography,
                              ST_GeogFromText(%(aoi)s), %(buf)s)
-              AND (il.category <> 'PUD' OR ri.status IS NULL
+              AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
                    OR ri.status IN ('remaining_pud', 'conflict'))
             GROUP BY 1, 2
             """,
@@ -735,7 +735,7 @@ def available_benches(
                   AND ST_Length(il.wellstick_geom) > 0
                   AND ST_Length(ST_Intersection(il.wellstick_geom, ST_GeomFromEWKT(%(aoi)s)))
                       >= 0.30 * ST_Length(il.wellstick_geom)
-                  AND (il.category <> 'PUD' OR ri.status IS NULL
+                  AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
                        OR ri.status IN ('remaining_pud', 'conflict'))
                 """,
                 {"aoi": aoi, "buf": buf_m},
@@ -822,11 +822,12 @@ _PDP_SQL = f"""
     ORDER BY api10
 """
 
-# PUD sticks are filtered through the §6 reconciliation (curated.reconciled_
-# inventory): only genuinely-remaining inventory (remaining_pud), ambiguous
+# PUD AND RES sticks are filtered through the §6 reconciliation (curated.
+# reconciled_inventory, engineering_db sql/68 — every Novi stick since D117,
+# 2026-10-21): only genuinely-remaining inventory (remaining_pud), ambiguous
 # (conflict), and NOT-YET-RECONCILED (no row — treat as remaining, don't
 # silently drop) are drillable locations — realized_drift/realized_phantom are
-# already drilled, so they're NOT shown. RES isn't reconciled (pass-through).
+# already drilled, so they're NOT shown, whatever Novi called the stick.
 _STICK_SQL = """
     SELECT il.stick_id, ifb.formation_blueox, il.tvd, il.unique_id,
            lower(il.category), ri.status,
@@ -842,7 +843,7 @@ _STICK_SQL = """
     WHERE il.category = ANY(%(cats)s) AND il.wellstick_geom IS NOT NULL
       AND ifb.formation_blueox IS NOT NULL
       AND ST_DWithin(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
-      AND (il.category = 'RES' OR ri.status IS NULL
+      AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
            OR ri.status IN ('remaining_pud', 'conflict'))
     ORDER BY il.stick_id
 """
