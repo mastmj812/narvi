@@ -5,6 +5,7 @@ import maplibregl, {
   type LngLatBoundsLike,
   type Map as MlMap,
   type StyleSpecification,
+  type VectorTileSource,
 } from "maplibre-gl";
 import { Protocol } from "pmtiles";
 import layers from "protomaps-themes-base";
@@ -82,14 +83,20 @@ function registerPmtilesProtocol() {
   pmtilesRegistered = true;
 }
 
+const BASEMAP_SOURCE = "protomaps";
+const BASEMAP_URL = "pmtiles:///api/basemap/permian.pmtiles";
+// Retry schedule for a basemap whose header/TileJSON load failed (see the
+// error handler in the map effect). ~41 s total covers a cold uvicorn start.
+const BASEMAP_RETRY_MS = [1000, 2000, 3000, 5000, 5000, 5000, 5000, 5000, 5000, 5000];
+
 function buildStyle(): StyleSpecification {
   return {
     version: 8,
     glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
     sources: {
-      protomaps: {
+      [BASEMAP_SOURCE]: {
         type: "vector",
-        url: "pmtiles:///api/basemap/permian.pmtiles",
+        url: BASEMAP_URL,
         attribution:
           '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org">OpenStreetMap</a>',
       },
@@ -228,8 +235,31 @@ export function MapView() {
     };
     map.on("load", setup);
 
+    // Basemap retry. The Vite proxy answers 502 on /api/basemap until uvicorn
+    // on :8078 is listening, and MapLibre marks a source whose metadata load
+    // failed as errored and never retries it — a tab opened before the backend
+    // was up stayed a blank white map until a manual reload (2026-11-02).
+    // setUrl() re-runs the pmtiles header load without touching any layer;
+    // the PDP tile source gets its errored tiles cleared on the same tick.
+    // Per-tile errors (e.tile set) are MapLibre's own business and are ignored.
+    let basemapRetries = 0;
+    let basemapTimer: number | undefined;
+    map.on("error", (e) => {
+      const ev = e as typeof e & { sourceId?: string; tile?: unknown };
+      if (ev.sourceId !== BASEMAP_SOURCE || ev.tile != null || basemapTimer !== undefined) return;
+      const delay = BASEMAP_RETRY_MS[basemapRetries];
+      if (delay === undefined) return;
+      basemapRetries += 1;
+      basemapTimer = window.setTimeout(() => {
+        basemapTimer = undefined;
+        (map.getSource(BASEMAP_SOURCE) as VectorTileSource | undefined)?.setUrl(BASEMAP_URL);
+        (map.getSource(PDP_SOURCE) as VectorTileSource | undefined)?.setTiles([pdpTileUrl()]);
+      }, delay);
+    });
+
     mapRef.current = map;
     return () => {
+      window.clearTimeout(basemapTimer);
       map.remove();
       mapRef.current = null;
     };
