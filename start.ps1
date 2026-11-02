@@ -50,7 +50,16 @@ try {
         $frontendCmd = "`$host.ui.RawUI.WindowTitle='narvi frontend (:5176)'; Set-Location '$frontend'; npm run dev"
         Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", $frontendCmd
         if (-not $NoBrowser) {
-            Write-Host "waiting for the frontend on :5176 (first compile + basemap take a few seconds) ..." -ForegroundColor Cyan
+            # Wait for the BACKEND first: Vite is up in well under a second, but
+            # uvicorn needs several (DB pool + boot DDL). A tab opened in that gap
+            # gets a 502 on the basemap and MapLibre showed a blank map until a
+            # manual reload (2026-11-02). The frontend now retries too, but the
+            # launcher should not hand the user a blank page in the first place.
+            Write-Host "waiting for the backend on :8078 (DB pool + boot DDL take a few seconds) ..." -ForegroundColor Cyan
+            if (-not (Wait-Port 8078 60)) {
+                Write-Host "backend not listening after 60 s - opening the app anyway; reload it once the backend window settles." -ForegroundColor Yellow
+            }
+            Write-Host "waiting for the frontend on :5176 ..." -ForegroundColor Cyan
             [void](Wait-Port 5176 40)
             Start-Process "http://localhost:5176"
         }
