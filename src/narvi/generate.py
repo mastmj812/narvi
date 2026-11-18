@@ -198,6 +198,14 @@ def _place_uturns(legs, spacing_m, centroid, phi, gb, p, turn_at_high,
     return wells
 
 
+# Public names for library callers (engineering_db box/sticks lays its own rows and hands
+# them to these, pinned by commit). The same functions; the underscore names stay for the
+# callers in this repo.
+make_leg = _make_leg
+single_well = _single_well
+place_uturns = _place_uturns
+
+
 def qualify_planned_names(wells: list[InventoryWell], label: str | None) -> None:
     """Prefix generator-named wells with the scenario's user-facing label
     (`WCB_2-01` -> `broTime 4-9 WCB_2-01`), in place.
