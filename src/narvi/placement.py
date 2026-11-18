@@ -138,6 +138,11 @@ def _longest_segment(geom: BaseGeometry) -> LineString | None:
     return None
 
 
+# Public name for library callers (engineering_db box/sticks imports the engine pinned by
+# commit). The same function; the underscore name stays for the callers in this repo.
+longest_segment = _longest_segment
+
+
 # The anchored flush row must be a FULL row, not "90% of one". t_mac_dsu_35_38_e2:
 # the two sections' west-line segments are laterally offset a few feet (a section-
 # corner jog), so the row-length profile L(y) jumps from half-length to full inside
