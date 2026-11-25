@@ -102,26 +102,30 @@ class InventoryWell:
     drilled_lateral_ft: float    # legs + turn arc (D&C cost)
     nearest_neighbor_spacing_ft: float
     setback_ft: float
-    # provenance: Novi pass-through ('pdp' existing / 'pud' / 'res') vs the
-    # generator ('generated'). Lets one record carry both the curate baseline
-    # (adopt Novi's locations) and the override/redesign path.
+    # provenance: warehouse pass-through ('pdp' existing producer / 'box' = an
+    # adopted BOX stick, engineering_db box.location_stick) vs the generator
+    # ('generated'). Lets one record carry both the curate baseline (adopt the
+    # BOX locations) and the override/redesign path. 'pud' / 'res' are HISTORY:
+    # adopted Novi sticks in scenarios saved before the BOX-stick cutover
+    # (2026-11); nothing derives them any more.
     category: str = "generated"
-    novi_wellname: str | None = None   # set for pud/res pass-through
+    novi_wellname: str | None = None   # legacy pud/res pass-through only
     edited: bool = False               # user-moved (capstone: gun-barrel drag)
     # near-parcel offset well (PDP outside the unit, within the context radius):
     # rendered dimmed for gun-barrel/map background, excluded from exports,
     # persistence and bench counts. Never True for unit-member wells.
     context: bool = False
-    # §6 reconciliation status for PUD pass-through (remaining_pud | conflict);
-    # realized_* PUDs are filtered out upstream (already drilled, not inventory).
+    # Reconciliation status of a pass-through stick. 'box': the BOX status
+    # (open | pending | permitted) - only sticks that count as inventory are
+    # adopted; crowded, conflict and producing ones are filtered out upstream.
+    # Legacy 'pud'/'res': Novi's (remaining_pud | conflict).
     recon_status: str | None = None
-    # Offset-PDP support: qualifying in-bench PDP offsets within 3 mi. Sourced
-    # from curated.intel_pdp_support (sql/30) for pud/res sticks; computed with
-    # the SAME gate against the stick's own legs for generated wells
-    # (warehouse.apply_handoff_support). Persists via `detail` — it is the
+    # Offset-PDP support: qualifying in-bench PDP offsets within 3 mi, counted
+    # against the well's own legs (warehouse.apply_handoff_support) for BOX
+    # sticks and generated wells alike. Persists via `detail` — it is the
     # provenance of the auto handoff category below. None = not scored.
     pdp_count_3mi: int | None = None
-    inflation_ratio: float | None = None  # Novi PUD EUR/ft vs offset median EUR/ft
+    inflation_ratio: float | None = None  # legacy pud/res only (a Novi EUR ratio)
     # Workbook-handoff classification (the inventory tab's `category` column):
     # 'PDP' (existing producer) / 'PUD' (pdp_count_3mi >= 3) / 'UPSIDE' (<= 2 or
     # unscored). Auto-derived (warehouse.derive_handoff_category) and USER-
@@ -129,10 +133,14 @@ class InventoryWell:
     # Persists via `detail`; the anduin Blue Ox exporter reads it and it wins
     # over the exporter's own fallback derivation.
     handoff_category: str | None = None
-    # Novi Intelligence stick id (curated.intel_locations.stick_id) for pud/res
-    # pass-through wells — stable across quarterly reloads (append-only
-    # stick_id_map). None for generated wells and PDP producers.
+    # Warehouse stick id of a pass-through location. 'box': box.location_stick
+    # .location_id (= curated.erebor_locations.stick_id, >= 10,000,001), valid
+    # within `box_set_id`. Legacy 'pud'/'res': the Novi Intelligence stick id.
+    # None for generated wells and PDP producers.
     stick_id: int | None = None
+    # The BOX stick set (box.location_set.set_id) an adopted 'box' well came
+    # from. A new set may renumber slots, so a re-save can tell the set moved.
+    box_set_id: int | None = None
     # Nearest co-extent PDP producer in 3-D (proximity.apply_pdp_standoff): the
     # frac-hit check against existing parents. None = not checked / no PDP runs
     # alongside. Persists via `detail`.

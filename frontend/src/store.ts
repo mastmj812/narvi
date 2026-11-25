@@ -24,10 +24,21 @@ import {
 } from "./api/client";
 
 // Per-bench inventory source — the core of the unified (no curate/override
-// toggle) model: for each bench the user either adopts the Novi baseline,
+// toggle) model: for each bench the user either adopts the BOX sticks,
 // generates their own wells, or drops it. The working set = the union across
 // benches, plus PDP as reference.
-export type BenchSource = "novi" | "generate" | "off";
+export type BenchSource = "box" | "generate" | "off";
+
+// A recipe saved before the BOX-stick cutover (2026-11) names Novi: its bench
+// source "novi" and categories "pud" / "res" replay as BOX sticks on load.
+export function forwardSources(src: Record<string, string> | null | undefined): Record<string, BenchSource> {
+  return Object.fromEntries(Object.entries(src ?? {}).map(
+    ([f, s]) => [f, (s === "novi" ? "box" : s) as BenchSource]));
+}
+export function forwardCats(cats: string[] | null | undefined): { pdp: boolean; box: boolean } {
+  const c = new Set(cats ?? ["pdp", "box"]);
+  return { pdp: c.has("pdp"), box: c.has("box") || c.has("pud") || c.has("res") };
+}
 
 const DEFAULT_PARAMS: Params = {
   // 330 ft setback is the typical section-line legal setback (default). N/S == E/W
@@ -62,20 +73,19 @@ function paramsFromScenario(sp: Record<string, unknown> | null | undefined): Par
 }
 
 // One row per bench in the unified bench table: the union of the unit's overlap
-// inventory (Novi counts) and the dev menu — the basin's FULL strat column,
-// always listed (generate places what Novi didn't stick). Rows run in column
+// inventory (BOX stick counts) and the dev menu — the basin's FULL strat column,
+// always listed (generate places sticks where there are none). Rows run in column
 // order, never TVD order. Overlap counts are the unit's truth; the dev median
-// TVD is preferred for generation (offset-sourced — overlap medians can carry
-// Novi placeholder TVDs, e.g. WDFD RES ~19k).
+// TVD is preferred for generation (offset-sourced first — a BOX stick's target
+// TVD may come from a thickness or grid rung).
 export interface BenchRow {
   formation: string;
   median_tvd_ft: number | null;
   n_pdp: number;
-  n_pud: number;
-  n_res: number;
+  n_box: number;                  // adoptable BOX sticks
   suggested_spacing_ft: number | null;
-  hasNovi: boolean;               // any overlapping PUD/RES to adopt
-  n_supported: number | null;     // pud/res sticks with offset support (sql/30); null in dev-only
+  hasBox: boolean;                // any in-unit BOX stick to adopt
+  n_supported: number | null;     // BOX sticks with offset support; null in dev-only
   depthAllowed: boolean | null;   // false = outside the deal depth window (soft flag)
   strat_rank: number | null;      // column position; null = off-column code (sorts last)
   tvd_basis: string | null;       // where the TVD came from (offset tier)
@@ -122,8 +132,8 @@ export function benchRows(
   for (const b of s.devBenches) {
     map.set(b.formation, {
       formation: b.formation, median_tvd_ft: b.median_tvd_ft,
-      n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
-      suggested_spacing_ft: b.suggested_spacing_ft, hasNovi: false,
+      n_pdp: b.n_pdp, n_box: b.n_box ?? 0,
+      suggested_spacing_ft: b.suggested_spacing_ft, hasBox: false,
       n_supported: null,
       depthAllowed: depthAllowedFor(b.median_tvd_ft, w),
       strat_rank: b.strat_rank ?? null, tvd_basis: b.tvd_basis ?? null,
@@ -136,14 +146,14 @@ export function benchRows(
     map.set(b.formation, {
       formation: b.formation,
       median_tvd_ft: tvd,
-      n_pdp: b.n_pdp, n_pud: b.n_pud, n_res: b.n_res,
+      n_pdp: b.n_pdp, n_box: b.n_box ?? 0,
       suggested_spacing_ft: dev?.suggested_spacing_ft ?? b.suggested_spacing_ft,
-      hasNovi: b.n_pud + b.n_res > 0,
+      hasBox: (b.n_box ?? 0) > 0,
       n_supported: b.n_supported ?? null,
       depthAllowed: depthAllowedFor(tvd, w),
       strat_rank: dev?.strat_rank ?? null,
       tvd_basis: dev?.median_tvd_ft != null ? dev.tvd_basis ?? null
-        : tvd != null ? "in-unit Novi sticks" : null,
+        : tvd != null ? "in-unit BOX sticks" : null,
       tvd_local: dev?.median_tvd_ft != null ? dev.tvd_local ?? null : tvd != null ? true : null,
       inversion: null,
     });
@@ -158,10 +168,10 @@ export function benchRows(
 // Default sources on inventory load, judged on the same TVD the bench table
 // shows (benchRows):
 // - window set: every in-window bench with LOCAL TVD evidence starts on —
-//   Novi where the unit has PUD/RES, generate otherwise. Out-of-window and
+//   BOX sticks where the unit has them, generate otherwise. Out-of-window and
 //   widened-TVD benches (tvd_local false — offsets miles out, e.g. an inverted
 //   WCD) start off.
-// - no window: Novi wherever the unit has PUD/RES, everything else off.
+// - no window: BOX sticks wherever the unit has them, everything else off.
 // SOFT either way: any bench can still be flipped — that's the override.
 function seedBenchSources(
   inv: InventoryResponse, parcel: ParcelInfo,
@@ -170,9 +180,9 @@ function seedBenchSources(
   const windowSet = !!w && (w.minFt != null || w.maxFt != null);
   const src: Record<string, BenchSource> = {};
   for (const r of benchRows({ benches: inv.benches, devBenches: inv.dev_benches, parcel })) {
-    if (!windowSet) src[r.formation] = r.hasNovi ? "novi" : "off";
+    if (!windowSet) src[r.formation] = r.hasBox ? "box" : "off";
     else if (r.depthAllowed !== true || r.tvd_local !== true) src[r.formation] = "off";
-    else src[r.formation] = r.hasNovi ? "novi" : "generate";
+    else src[r.formation] = r.hasBox ? "box" : "generate";
   }
   return src;
 }
@@ -273,7 +283,7 @@ export function genStale(s: State): boolean {
 
 type ComposeSlice = Pick<State, "inventory" | "result" | "benchSource" | "cats" | "culledWells">;
 
-// The composed working-set FeatureCollection: Novi-sourced benches' PUD/RES from
+// The composed working-set FeatureCollection: box-sourced benches' BOX sticks from
 // the inventory + generate-sourced benches' wells from the result + PDP always
 // (reality/reference, independent of bench source), culls across everything.
 export function composeFC(s: ComposeSlice): GeoJSON.FeatureCollection | null {
@@ -290,9 +300,9 @@ export function composeFC(s: ComposeSlice): GeoJSON.FeatureCollection | null {
         if (p.context || p.category === "pdp") {
           if (s.cats.pdp) features.push(f);
         } else if (p.kind === "turn") {
-          if (s.benchSource[p.formation] === "novi") features.push(f);
-        } else if ((p.category === "pud" || p.category === "res")
-            && s.benchSource[p.formation] === "novi" && s.cats[p.category as Category]) {
+          if (s.benchSource[p.formation] === "box" && s.cats.box) features.push(f);
+        } else if (p.category === "box"
+            && s.benchSource[p.formation] === "box" && s.cats.box) {
           features.push(f);
         }
       } else if (p.kind !== "window") {
@@ -327,13 +337,13 @@ export function composeGunbarrel(s: ComposeSlice): GunbarrelData | null {
       if (culled.has(p.well_name)) continue;
       if (p.category === "pdp" || p.context) {
         if (s.cats.pdp) points.push({ ...p, context: true });
-      } else if ((p.category === "pud" || p.category === "res")
-          && s.benchSource[p.formation] === "novi" && s.cats[p.category as Category]) {
+      } else if (p.category === "box"
+          && s.benchSource[p.formation] === "box" && s.cats.box) {
         points.push(p);
       }
     }
     for (const l of inv.links) {
-      if (!culled.has(l.well_name) && s.benchSource[l.formation] === "novi") links.push(l);
+      if (!culled.has(l.well_name) && s.benchSource[l.formation] === "box" && s.cats.box) links.push(l);
     }
   }
   if (gen) {
@@ -393,7 +403,7 @@ interface State {
   feasibility: DirectionFeasibility[] | null;
   scan: ScanConfig[] | null;
   scanning: boolean;
-  benches: BenchInfo[];            // overlap inventory (unit truth: Novi counts)
+  benches: BenchInfo[];            // overlap inventory (unit truth: BOX stick counts)
   devBenches: BenchInfo[];         // area-developable benches (generation control)
   benchSource: Record<string, BenchSource>;
   cats: Record<Category, boolean>;
@@ -509,7 +519,7 @@ export const useStore = create<State>((set, get) => ({
   benches: [],
   devBenches: [],
   benchSource: {},
-  cats: { pdp: true, pud: true, res: false },
+  cats: { pdp: true, box: true },
   culledWells: [],
   categoryOverrides: {},
 
@@ -595,7 +605,7 @@ export const useStore = create<State>((set, get) => ({
     set({ loading: true, error: null });
     const dw = s.parcel.depthWindow;
     try {
-      const inv = await api.inventory(s.parcel.geojson, 5280, ["pdp", "pud", "res"],
+      const inv = await api.inventory(s.parcel.geojson, 5280, ["pdp", "box"],
         null, dw?.minFt ?? null, dw?.maxFt ?? null);
       const sourceable = inv.dev_benches.filter((b) => b.n_pdp >= 3);
       const shallow = sourceable.find((b) => b.median_tvd_ft != null)
@@ -712,7 +722,7 @@ export const useStore = create<State>((set, get) => ({
     catch (e) { set({ error: String(e) }); }
   },
 
-  // One save for the whole composed plan: the server re-derives the kept Novi
+  // One save for the whole composed plan: the server re-derives the kept BOX
   // baseline, regenerates the generate-sourced benches from the recipe, merges,
   // bakes culls out, and persists — so the saved rows never depend on client
   // display state.
@@ -745,7 +755,7 @@ export const useStore = create<State>((set, get) => ({
         deal_id: deal, scenario_id: `plan_${slug}`, name: finalName,
         parcel: s.parcel.geojson,
         bench_sources: s.benchSource,
-        categories: (["pdp", "pud", "res"] as Category[]).filter((c) => s.cats[c]),
+        categories: (["pdp", "box"] as Category[]).filter((c) => s.cats[c]),
         culled_wells: s.culledWells,
         category_overrides: categoryOverrides,
         params: s.params,
@@ -837,12 +847,8 @@ export const useStore = create<State>((set, get) => ({
           // (wells regenerated 90° off axis).
           params: { ...DEFAULT_PARAMS, ...paramsFromScenario(cs.generate?.params) },
           sourceAzimuth: cs.generate?.source_azimuth ?? true,
-          benchSource: (cs.bench_sources ?? {}) as Record<string, BenchSource>,
-          cats: {
-            pdp: (cs.categories ?? []).includes("pdp"),
-            pud: (cs.categories ?? []).includes("pud"),
-            res: (cs.categories ?? []).includes("res"),
-          },
+          benchSource: forwardSources(cs.bench_sources),
+          cats: forwardCats(cs.categories ?? []),
           benchTvd: Object.fromEntries(zones.map((z) => [z.formation, z.target_tvd_ft])),
           benchSpacing: Object.fromEntries(zones.filter((z) => z.spacing_ft != null)
             .map((z) => [z.formation, z.spacing_ft as number])),
@@ -862,7 +868,7 @@ export const useStore = create<State>((set, get) => ({
 
       if (summary?.mode === "curate" && r.parcel) {
         // legacy curate save = a filter recipe over live inventory — map it into
-        // the unified model: kept benches with Novi inventory -> source 'novi'
+        // the unified model: kept benches with BOX sticks -> source 'box'
         set({
           parcels: mergeParcels(r.parcel), parcel: r.parcel, ...PARCEL_RESET,
           loaded: { deal_id, scenario_id, name: meta?.name ?? null },
@@ -874,14 +880,13 @@ export const useStore = create<State>((set, get) => ({
         });
         await get().fetchInventory({ seed: false });
         const kept = new Set(summary.kept_benches ?? []);
-        const active = new Set(summary.categories ?? ["pdp", "pud", "res"]);
         const src: Record<string, BenchSource> = {};
         for (const row of benchRows(get())) {
-          src[row.formation] = kept.has(row.formation) && row.hasNovi ? "novi" : "off";
+          src[row.formation] = kept.has(row.formation) && row.hasBox ? "box" : "off";
         }
         set({
           benchSource: src,
-          cats: { pdp: active.has("pdp"), pud: active.has("pud"), res: active.has("res") },
+          cats: forwardCats(summary.categories),
           culledWells: summary.culled_wells ?? [],
           loading: false,
         });

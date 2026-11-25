@@ -31,7 +31,7 @@ from ..deps import get_conn
 from ..engine import check_pdp_standoff, run_generate
 from ..models import (
     GenerateRequest, SaveComposedRequest, SaveCurateRequest, SaveScenarioRequest,
-    ScenarioSummary,
+    ScenarioSummary, legacy_names,
 )
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
@@ -204,8 +204,11 @@ def prepare_curate(
     req: SaveCurateRequest, conn: psycopg.Connection
 ) -> PreparedSave:
     """Read-only compute half of the curate save (POST /scenarios/curate)."""
+    why = legacy_names(req.categories)
+    if why:
+        raise HTTPException(status_code=400, detail=why)
     parcel = parcel_from_geojson(req.parcel)
-    cats = tuple(c for c in ("pdp", "pud", "res") if c in req.categories)
+    cats = tuple(c for c in ("pdp", "box") if c in req.categories)
     wells, frame_az = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
     kept = set(req.kept_benches)
     culled = set(req.culled_wells)
@@ -233,7 +236,7 @@ def prepare_curate(
 
 @router.post("/curate")
 def save_curate(req: SaveCurateRequest, conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """Persist a curated Novi-inventory baseline (the kept-PUD/PDP/RES set) directly,
+    """Persist a curated baseline (the kept BOX sticks + PDP producers) directly,
     without a generate run. Re-derives the parcel's inventory server-side and keeps
     the wells whose bench is selected and whose category is active."""
     ps = prepare_curate(req, conn)
@@ -247,23 +250,26 @@ def prepare_composed(
     req: SaveComposedRequest, conn: psycopg.Connection
 ) -> PreparedSave:
     """Read-only compute half of the composed save (POST /scenarios/composed)."""
+    why = legacy_names(req.categories, req.bench_sources)
+    if why:
+        raise HTTPException(status_code=400, detail=why)
     parcel = parcel_from_geojson(req.parcel)
-    novi_benches = {f for f, s in req.bench_sources.items() if s == "novi"}
+    box_benches = {f for f, s in req.bench_sources.items() if s == "box"}
     gen_zones = [z for z in req.zones if req.bench_sources.get(z.formation) == "generate"]
 
     wells = []
     passthrough: list[InventoryWell] = []
     frame_az: float | None = None
     note, notes = "", []
-    cats = tuple(c for c in ("pdp", "pud", "res") if c in req.categories)
-    if novi_benches or "pdp" in cats:
+    cats = tuple(c for c in ("pdp", "box") if c in req.categories)
+    if box_benches or "pdp" in cats:
         inv, frame_az = inventory_from_warehouse(conn, parcel, req.buffer_ft, cats)
         # PDP are reality — they persist independent of bench source (the same
-        # rule the client display uses); PUD/RES only from adopted benches
+        # rule the client display uses); BOX sticks only from adopted benches
         passthrough = [w for w in inv
-                       if w.category == "pdp" or w.formation in novi_benches]
+                       if w.category == "pdp" or w.formation in box_benches]
         wells += passthrough
-        note = f"{len(wells)} kept Novi/PDP wells in {len(novi_benches)} benches"
+        note = f"{len(wells)} kept BOX/PDP wells in {len(box_benches)} benches"
     p = None
     if gen_zones:
         greq = GenerateRequest(
@@ -335,7 +341,7 @@ def prepare_composed(
 def save_composed(
     req: SaveComposedRequest, conn: psycopg.Connection = Depends(get_conn)
 ) -> dict:
-    """Persist a composed plan: kept Novi inventory (benches sourced 'novi') plus
+    """Persist a composed plan: kept BOX sticks (benches sourced 'box') plus
     server-side generated wells (benches sourced 'generate') as ONE scenario.
     Culls bake out. The full recipe rides summary so loads restore editable."""
     ps = prepare_composed(req, conn)

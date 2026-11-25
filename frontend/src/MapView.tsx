@@ -215,9 +215,9 @@ export function MapView() {
         const p = e.features?.[0]?.properties as Record<string, unknown> | undefined;
         if (!p) return;
         map.getCanvas().style.cursor = "pointer";
-        // offset-PDP support (curated.intel_pdp_support) — pud/res sticks only
+        // offset-PDP support (narvi's own 3-mi count) — adopted BOX sticks
         const cat = String(p.category ?? "");
-        const sup = (cat === "pud" || cat === "res") && p.pdp_count_3mi != null
+        const sup = cat === "box" && p.pdp_count_3mi != null
           ? `PDP support: ${p.pdp_count_3mi} @3mi`
             + (p.inflation_ratio != null ? ` · EUR/ft ${Number(p.inflation_ratio).toFixed(2)}×` : "")
           : undefined;

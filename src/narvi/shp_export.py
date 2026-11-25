@@ -1,7 +1,8 @@
 """Scenario FeatureCollection -> zipped ESRI shapefile (.shp/.shx/.dbf/.prj/.cpg).
 
 The geologist-facing handoff (GGX/GeoGraphix ingests shapefiles, not GeoJSON).
-Only INVENTORY sticks export — producing legs with category pud/res/generated.
+Only INVENTORY sticks export — producing legs with category box/generated (pud/res on a
+scenario saved before the BOX cutover).
 PDP legs are existing production, not inventory, and context (near-parcel
 background) wells never export anywhere; both are filtered here regardless of
 what the caller passes in.

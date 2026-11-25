@@ -12,9 +12,10 @@ z 6-8 -> one point per stick (`pdp_points`), z >= 9 -> full stick linestrings
 (`pdp_lines`). No filters -> the ETag is static per tile, and the data refreshes
 nightly, so tiles cache for an hour.
 
-The matview is dropped by the quarterly Novi reload (intel_locations CASCADE);
-until engineering_db's apply script re-creates it we return 503, which the
-frontend treats as "layer unavailable" rather than an error storm.
+Since engineering_db's 2026-11 change a quarterly Novi reload no longer drops
+the matview (proven on the Midland 2026Q4 reload). Should it ever be missing we
+still return 503, which the frontend treats as "layer unavailable" rather than
+an error storm.
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ def _tile_etag(z: int, x: int, y: int) -> str:
     responses={
         200: {"content": {MVT_CONTENT_TYPE: {}}},
         204: {"description": "No features at this tile/zoom"},
-        503: {"description": "curated.erebor_locations missing (Novi reload window)"},
+        503: {"description": "curated.erebor_locations missing"},
     },
 )
 def pdp_tile(
@@ -126,8 +127,8 @@ def pdp_tile(
     except psycopg.errors.UndefinedTable:
         raise HTTPException(
             status_code=503,
-            detail="curated.erebor_locations is missing — re-run the "
-                   "engineering_db apply script after the Novi reload")
+            detail="curated.erebor_locations is missing — re-run "
+                   "engineering_db scripts.apply_box_stick_locations")
 
     payload: bytes = bytes(row[0]) if row and row[0] is not None else b""
     if not payload:

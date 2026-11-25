@@ -48,7 +48,7 @@ export function ScenarioBar() {
   useEffect(() => { setName(loaded?.name ?? ""); }, [loaded]);
 
   // saving needs a parcel + inventory (the composed save re-derives the kept
-  // Novi baseline and regenerates server-side); export only needs the current
+  // BOX sticks and regenerates server-side); export only needs the current
   // FC, so it also works on a loaded scenario.
   const canSave = !!parcel && !!inventory;
 
