@@ -390,3 +390,40 @@ def test_header_well_type_mixed_only_when_planned_wells_differ():
     assert header_well_type(p, [w("uturn"), w("single")]) == "mixed"
     assert header_well_type(p, [w("uturn"), w("single", "pdp")]) == "uturn"  # PDP don't count
     assert header_well_type(p, []) == "uturn"
+
+
+# --- BOX sticks are the locations; the Novi names are refused (2026-11) -------
+
+def test_legacy_novi_names_are_refused_and_saved_recipes_map_forward():
+    from app.models import forward_categories, forward_sources, legacy_names
+
+    assert legacy_names(["pdp", "box"], {"WCA_1": "box", "WCB_1": "generate", "WCC": "off"}) is None
+    assert "retired" in legacy_names(["pdp", "pud"]) and "'box'" in legacy_names(["res"])
+    why = legacy_names(["pdp", "box"], {"WCA_1": "novi"})
+    assert "bench source 'novi' is retired" in why and "WCA_1" in why
+    # only the replay of a SAVED recipe maps the old names forward
+    assert forward_categories(["pdp", "pud", "res"]) == ["pdp", "box"]
+    assert forward_categories(None) == ["pdp", "box"] and forward_categories(["pdp"]) == ["pdp"]
+    assert forward_sources({"WCA_1": "novi", "WCB_1": "generate"}) == {"WCA_1": "box", "WCB_1": "generate"}
+
+
+def test_a_request_naming_novi_sticks_gets_a_400_before_any_query():
+    from app.deps import get_conn
+
+    app.dependency_overrides[get_conn] = lambda: None      # a query would raise on None
+    try:
+        parcel = _synthetic_parcel_geojson()
+        r = client.post("/api/parcels/inventory", json={"parcel": parcel, "categories": ["pdp", "pud"]})
+        assert r.status_code == 400 and "retired" in r.json()["detail"]
+        r = client.post("/api/scenarios/composed", json={
+            "deal_id": "t", "scenario_id": "t", "parcel": parcel,
+            "bench_sources": {"WCA_1": "novi"}, "zones": [],
+            "params": {"spacing_ft": 880, "setback_ft": 200, "formation": "WCA_1",
+                       "target_tvd_ft": 11500}})
+        assert r.status_code == 400 and "bench source 'novi' is retired" in r.json()["detail"]
+        r = client.post("/api/scenarios/curate", json={
+            "deal_id": "t", "scenario_id": "t", "parcel": parcel,
+            "kept_benches": ["WCA_1"], "categories": ["pdp", "res"]})
+        assert r.status_code == 400 and "retired" in r.json()["detail"]
+    finally:
+        app.dependency_overrides.pop(get_conn, None)

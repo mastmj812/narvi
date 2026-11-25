@@ -51,6 +51,7 @@ from .api.scenarios import (
 )
 from .models import (
     GenerateRequest, SaveComposedRequest, SaveCurateRequest, SaveScenarioRequest,
+    forward_categories, forward_sources,
 )
 
 # Tolerances. Stored gunbarrel offsets and azimuths are rounded to 0.1, and the
@@ -304,8 +305,10 @@ def rebuild_request(header: dict, aoi_geojson: dict | None):
             req = SaveComposedRequest(
                 deal_id=deal_id, scenario_id=scenario_id, name=name,
                 parcel=aoi_geojson,
-                bench_sources=summary.get("bench_sources") or {},
-                categories=summary.get("categories") or ["pdp", "pud", "res"],
+                # a recipe saved before the BOX cutover names Novi: replay it
+                # on BOX sticks (decided 2026-11-24: a re-save picks them up)
+                bench_sources=forward_sources(summary.get("bench_sources")),
+                categories=forward_categories(summary.get("categories")),
                 culled_wells=summary.get("culled_wells") or [],
                 params=gen["params"], zones=gen.get("zones") or [],
                 source_azimuth=gen.get("source_azimuth", True),
@@ -318,7 +321,7 @@ def rebuild_request(header: dict, aoi_geojson: dict | None):
                 deal_id=deal_id, scenario_id=scenario_id, name=name,
                 parcel=aoi_geojson,
                 kept_benches=summary.get("kept_benches") or [],
-                categories=summary.get("categories") or ["pdp", "pud", "res"],
+                categories=forward_categories(summary.get("categories")),
                 culled_wells=summary.get("culled_wells") or [],
                 category_overrides=overrides)
             return req, "curate", None

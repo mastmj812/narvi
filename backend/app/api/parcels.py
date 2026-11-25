@@ -38,6 +38,7 @@ from ..models import (
     InventoryResponse,
     ParcelInfo,
     ParcelsResponse,
+    legacy_names,
 )
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
@@ -47,22 +48,26 @@ _ACRE_M2 = 4046.8564224
 
 @router.post("/inventory", response_model=InventoryResponse)
 def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn)) -> InventoryResponse:
-    """Existing inventory in/around a parcel — PDP producers + Novi PUD/RES sticks
+    """Existing inventory in/around a parcel — PDP producers + adoptable BOX sticks
     as InventoryWells (the curate baseline) + the bench menu. Drives the initial
     map + gun-barrel before any curation."""
+    why = legacy_names(req.categories)
+    if why:
+        raise HTTPException(status_code=400, detail=why)
     parcel = parcel_from_geojson(req.parcel)
     # membership is decided by co-extent overlap inside inventory_from_warehouse;
     # near-parcel PDP comes back flagged context=true (visual background only).
     wells, _frame_az = inventory_from_warehouse(
         conn, parcel, req.buffer_ft, tuple(req.categories),
         context_radius_ft=req.context_radius_ft)
-    # Handoff classification for display (PDP/PUD/UPSIDE). DB-free pass:
-    # curated pud/res sticks already carry their intel_pdp_support counts.
-    apply_handoff_support(None, wells)
+    # Handoff classification for display (PDP/PUD/UPSIDE): BOX sticks are scored
+    # here against their own legs (one indexed count per stick), the same gate
+    # a save applies, so the display and the saved category agree.
+    apply_handoff_support(conn, wells)
     unit_wells = [w for w in wells if not w.context]
     benches = bench_summary(unit_wells)                     # overlap inventory -> curate
     # Generation menu = the basin's FULL strat column (generate exists for benches
-    # Novi didn't stick); the 1-mi ring only supplies counts/spacing, and the TVD
+    # with no BOX stick); the 1-mi ring only supplies counts/spacing, and the TVD
     # estimate widens to the nearest offsets when the ring is thin.
     dev = available_benches(conn, parcel, buffer_ft=5280.0)
     # Deal depth window (engineer-entered, ft TVD): flag out-of-window benches in
@@ -74,7 +79,8 @@ def inventory(req: InventoryRequest, conn: psycopg.Connection = Depends(get_conn
     def _bm(b):
         return BenchInfoModel(
             formation=b.formation, median_tvd_ft=b.median_tvd_ft, n_pdp=b.n_pdp,
-            n_pud=b.n_pud, n_res=b.n_res, suggested_spacing_ft=b.suggested_spacing_ft,
+            n_pud=b.n_pud, n_res=b.n_res, n_box=b.n_box,
+            suggested_spacing_ft=b.suggested_spacing_ft,
             note=b.note, n_supported=b.n_supported, depth_allowed=b.depth_allowed,
             strat_rank=b.strat_rank, tvd_basis=b.tvd_basis, tvd_local=b.tvd_local)
 

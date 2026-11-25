@@ -8,8 +8,7 @@ import {
 
 const CATS: { key: Category; label: string }[] = [
   { key: "pdp", label: "PDP (existing)" },
-  { key: "pud", label: "PUD (plan)" },
-  { key: "res", label: "RES (resource)" },
+  { key: "box", label: "BOX sticks (plan)" },
 ];
 
 function NumberField<K extends keyof Params>(
@@ -31,8 +30,8 @@ function NumberField<K extends keyof Params>(
 }
 
 // One workflow, no curate/override toggle: pick a deal, load its inventory,
-// then per bench either adopt the Novi baseline, generate your own wells, or
-// drop it. The working set (kept Novi + generated + PDP reference) renders in
+// then per bench either adopt the BOX sticks, generate your own wells, or
+// drop it. The working set (kept BOX sticks + generated + PDP reference) renders in
 // one map / gun-barrel and saves as one scenario.
 export function PlanPanel() {
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -69,7 +68,7 @@ export function PlanPanel() {
   const planPts = (gb?.points ?? []).filter((p) => !p.context);
   const wellsOf = (pts: typeof planPts) => new Set(pts.map((p) => p.well_name)).size;
   const planWells = wellsOf(planPts);
-  const noviWells = wellsOf(planPts.filter((p) => p.category === "pud" || p.category === "res"));
+  const boxWells = wellsOf(planPts.filter((p) => p.category === "box"));
   const genWells = wellsOf(planPts.filter((p) => p.category === "generated"));
   const pdpWells = new Set((gb?.points ?? [])
     .filter((p) => p.category === "pdp").map((p) => p.well_name)).size;
@@ -279,10 +278,9 @@ export function PlanPanel() {
         {rows.map((b) => {
           const src = benchSource[b.formation] ?? "off";
           const flagged = b.depthAllowed === false;
-          const ctrl = [b.n_pdp ? `${b.n_pdp} PDP` : null, b.n_pud ? `${b.n_pud} PUD` : null,
-            b.n_res ? `${b.n_res} RES` : null,
-            (b.n_supported != null && b.n_pud + b.n_res > 0)
-              ? `${b.n_supported}/${b.n_pud + b.n_res} supp` : null,
+          const ctrl = [b.n_pdp ? `${b.n_pdp} PDP` : null, b.n_box ? `${b.n_box} BOX` : null,
+            (b.n_supported != null && b.n_box > 0)
+              ? `${b.n_supported}/${b.n_box} supp` : null,
           ].filter(Boolean).join(" · ") || "no control";
           const sp = benchSpacing[b.formation] ?? b.suggested_spacing_ft ?? params.spacing_ft;
           const opts = benchOpts[b.formation] ?? {};
@@ -315,8 +313,8 @@ export function PlanPanel() {
                   onChange={(e) => setBenchSource(b.formation, e.target.value as BenchSource)}
                   style={{ width: 92 }}
                 >
-                  <option value="novi" disabled={!b.hasNovi}>
-                    {b.hasNovi ? `Novi (${b.n_pud + b.n_res})` : "Novi (—)"}
+                  <option value="box" disabled={!b.hasBox}>
+                    {b.hasBox ? `BOX (${b.n_box})` : "BOX (—)"}
                   </option>
                   <option value="generate">generate</option>
                   <option value="off">off</option>
@@ -326,7 +324,7 @@ export function PlanPanel() {
                 <>
                   <div className="field" style={{ paddingLeft: 12 }}>
                     <label style={{ color: "var(--muted)", fontSize: 11 }}
-                      title="leg-to-leg for this bench; Novi develops Bone Spring wider than Wolfcamp">
+                      title="leg-to-leg for this bench; the suggestion is the in-unit BOX sticks' planned spacing">
                       spacing (ft)
                     </label>
                     <input type="number" step={10} style={{ width: 80 }}
@@ -406,7 +404,7 @@ export function PlanPanel() {
           <div className="summary">
             <div>
               <b>{planWells}</b> wells in plan
-              {planWells > 0 && <> · {noviWells} Novi + {genWells} generated</>}
+              {planWells > 0 && <> · {boxWells} BOX + {genWells} generated</>}
               {pdpWells > 0 && <span className="note" style={{ marginTop: 0 }}> · {pdpWells} PDP ref</span>}
             </div>
             {culledWells.length > 0 && (

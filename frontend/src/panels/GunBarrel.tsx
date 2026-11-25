@@ -113,7 +113,7 @@ export function GunBarrel() {
   const depthWindow = useStore((s) => s.parcel?.depthWindow);
   const culledSet = useMemo(() => new Set(culledWells), [culledWells]);
 
-  // One composed working set (store.composeGunbarrel): Novi-sourced benches from
+  // One composed working set (store.composeGunbarrel): box-sourced benches from
   // the inventory + generate-sourced benches from the result + PDP reference.
   // The legend is ALWAYS rebuilt from the shared formation_blueox palette so
   // swatches match the markers (the backend's palette is ignored here).
@@ -211,7 +211,7 @@ export function GunBarrel() {
   // color = bench (default) or offset-PDP support (shared "Color by PDP support"
   // toggle). pdp are producing reference wells (not scored) -> stay bench-colored.
   const colorOf = (p: Pt) =>
-    supportColor && (p.category === "pud" || p.category === "res" || p.category === "generated")
+    supportColor && (p.category === "box" || p.category === "generated")
       ? colorForSupport(p.pdp_count_3mi)
       : colorForBlueox(p.formation);
 

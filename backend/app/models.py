@@ -104,7 +104,7 @@ class InventoryRequest(BaseModel):
     # spatial pre-filter before the co-extent membership test; wide so any lateral
     # overlapping the unit is fetched (membership decides, not the buffer)
     buffer_ft: float = 5280.0
-    categories: list[str] = ["pdp", "pud", "res"]
+    categories: list[str] = ["pdp", "box"]
     # near-parcel PDP background (context=true wells). Default OFF: the basin-wide
     # PDP tile layer is the map context, and the gun-barrel is a UNIT cross-section
     # — offset wells a mile out just clutter it (user feedback, bro_time 1 4-9).
@@ -122,15 +122,16 @@ class BenchInfoModel(BaseModel):
     formation: str
     median_tvd_ft: float | None
     n_pdp: int
-    n_pud: int
-    n_res: int
+    n_pud: int                       # legacy, always 0 (Novi sticks are no longer locations)
+    n_res: int                       # legacy, always 0
+    n_box: int = 0                   # adoptable BOX sticks
     suggested_spacing_ft: float | None
     note: str
-    n_supported: int | None = None   # pud/res sticks with offset support (sql/30); null in dev menu
+    n_supported: int | None = None   # BOX sticks with offset support; null in dev menu
     depth_allowed: bool | None = None  # False = outside the deal depth window (soft flag)
     strat_rank: int | None = None      # position in the basin's strat column (0 = shallowest)
     tvd_basis: str | None = None       # provenance of median_tvd_ft (offset tier)
-    tvd_local: bool | None = None      # False = estimate reached past the ring / Novi TVDs
+    tvd_local: bool | None = None      # False = estimate reached past the ring
 
 
 class InventoryResponse(BaseModel):
@@ -210,17 +211,17 @@ class SaveScenarioRequest(BaseModel):
 
 
 class SaveComposedRequest(BaseModel):
-    """Persist a composed plan: per bench the user either adopts the Novi baseline
-    ('novi'), designs their own wells ('generate'), or drops it ('off'). The kept
-    Novi inventory and the generated wells persist together as ONE scenario — the
+    """Persist a composed plan: per bench the user either adopts the BOX sticks
+    ('box'), designs their own wells ('generate'), or drops it ('off'). The kept
+    BOX sticks and the generated wells persist together as ONE scenario — the
     unified successor to the curate/override either-or saves."""
 
     deal_id: str
     scenario_id: str
     name: str | None = None
     parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
-    bench_sources: dict[str, str]              # formation -> novi | generate | off
-    categories: list[str] = ["pdp", "pud", "res"]   # active display/persist categories
+    bench_sources: dict[str, str]              # formation -> box | generate | off
+    categories: list[str] = ["pdp", "box"]   # active display/persist categories
     culled_wells: list[str] = []               # per-well culls (well_name) baked out
     params: ScenarioParamsModel                # deal-level generator params
     zones: list[ZoneModel] = []                # per-bench TVD/spacing (generate benches)
@@ -246,7 +247,7 @@ class SaveCurateRequest(BaseModel):
     name: str | None = None
     parcel: dict[str, Any]                     # GeoJSON (Multi)Polygon, WGS84
     kept_benches: list[str]                    # formation_blueox codes kept
-    categories: list[str] = ["pdp", "pud", "res"]   # active categories
+    categories: list[str] = ["pdp", "box"]   # active categories
     culled_wells: list[str] = []               # per-well culls (well_name) to drop
     category_overrides: dict[str, Literal["PUD", "UPSIDE"]] = {}
     buffer_ft: float = 5280.0                  # match /parcels/inventory: same fetch,
@@ -274,3 +275,42 @@ class ScenarioSummary(BaseModel):
     total_legs: int | None
     total_completed_ft: float | None
     azimuth_deg: float | None
+
+
+# ---------------------------------------------------------------------------
+# Location source of record = BOX sticks (2026-11). Novi sticks are comparison
+# data only: nothing adopts them. A request that still names them is refused
+# loudly rather than quietly served something else; only the replay of a SAVED
+# recipe (app.resave, the frontend load path) maps the old names forward.
+# ---------------------------------------------------------------------------
+LEGACY_CATEGORIES: tuple[str, ...] = ("pud", "res")
+LEGACY_SOURCE = "novi"
+
+
+def legacy_names(categories: list[str] | None = None,
+                 bench_sources: dict[str, str] | None = None) -> str | None:
+    """Why this request cannot be served, or None. Pure."""
+    bad = sorted(c for c in (categories or []) if c in LEGACY_CATEGORIES)
+    if bad:
+        return (f"categories {bad} are retired: Novi PUD / RES sticks are no longer "
+                "adoptable locations. Use 'box' (the BOX sticks).")
+    novi = sorted(f for f, s in (bench_sources or {}).items() if s == LEGACY_SOURCE)
+    if novi:
+        return (f"bench source 'novi' is retired (benches {novi}): Novi sticks are no "
+                "longer adoptable locations. Use 'box' (the BOX sticks).")
+    return None
+
+
+def forward_categories(categories: list[str] | None) -> list[str]:
+    """A SAVED recipe's categories with 'pud' / 'res' mapped to 'box' (order kept)."""
+    out: list[str] = []
+    for c in categories or ["pdp", "box"]:
+        c = "box" if c in LEGACY_CATEGORIES else c
+        if c not in out:
+            out.append(c)
+    return out
+
+
+def forward_sources(bench_sources: dict[str, str] | None) -> dict[str, str]:
+    """A SAVED recipe's bench sources with 'novi' mapped to 'box'."""
+    return {f: ("box" if s == LEGACY_SOURCE else s) for f, s in (bench_sources or {}).items()}

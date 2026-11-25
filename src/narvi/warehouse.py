@@ -32,13 +32,14 @@ from dataclasses import dataclass
 import psycopg
 from dotenv import load_dotenv
 from pyproj import CRS, Transformer
+from shapely import wkt as shp_wkt
 from shapely.geometry import LineString
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import transform as shp_transform
 
 from .parcel import WORK_EPSG
-from .placement import cross_axis, dominant_azimuth, gunbarrel_offset_ft
-from .records import FT_PER_M, InventoryWell, Leg, Zone
+from .placement import dominant_azimuth, gunbarrel_offset_ft
+from .records import FT_PER_M, InventoryWell, Leg, Turn, Zone
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"))
 
@@ -438,11 +439,11 @@ class BenchInfo:
     formation: str                  # formation_blueox code
     median_tvd_ft: float | None
     n_pdp: int                      # producing wells (proven; -> anduin TC route)
-    n_pud: int                      # Novi PUD sticks
-    n_res: int                      # Novi RES sticks (resource/edge of fairway)
-    suggested_spacing_ft: float | None   # de-facto same-bench lateral spacing
+    n_pud: int                      # legacy (Novi PUD sticks): always 0 since BOX sticks
+    n_res: int                      # legacy (Novi RES sticks): always 0 since BOX sticks
+    suggested_spacing_ft: float | None   # the in-unit BOX sticks' planned spacing
     note: str = ""
-    # pud/res sticks in this bench with offset support (pdp_count_3mi > 0). None
+    # BOX sticks in this bench with offset support (pdp_count_3mi > 0). None
     # where not computed (the dev-benches menu). Kept after `note` so existing
     # positional BenchInfo(...) constructions are unaffected.
     n_supported: int | None = None
@@ -455,16 +456,19 @@ class BenchInfo:
     # None = not a column code (OTHER, unit-only oddities) -> sorts after.
     strat_rank: int | None = None
     # where median_tvd_ft came from (available_benches tiers). tvd_local=False
-    # means the estimate reached beyond the 1-mi ring or fell back to Novi
-    # stick TVDs — usable, but say so.
+    # means the estimate reached beyond the 1-mi ring (the nearest producers or
+    # BOX sticks) — usable, but say so.
     tvd_basis: str | None = None
     tvd_local: bool | None = None
+    # adoptable BOX sticks (engineering_db box.location_stick, record set,
+    # counts as inventory). Appended last per the positional-construction rule.
+    n_box: int = 0
 
 
 # Stratigraphic columns, shallow -> deep, in formation_blueox codes. The bench
 # menu always lists the WHOLE column for the parcel's basin — the generator's
-# job is placing sticks Novi didn't (a bench with no Novi inventory nearby is
-# exactly when you need it), so local evidence must not decide which benches
+# job is placing sticks where there are none (a bench with no BOX sticks nearby
+# is exactly when you need it), so local evidence must not decide which benches
 # exist. Mirrors anduin frontend/src/map/formations.ts BASIN_CODES (OTHER
 # dropped: not a bench) — change both or neither.
 STRAT_COLUMN: dict[str, list[str]] = {
@@ -491,7 +495,7 @@ DEFAULT_BASIN = "delaware"          # narvi is Delaware-first; used when no well
 # Bench TVD estimate tiers (available_benches). Fewer than this many ring
 # producers is labelled thin (still used — same precedence as before). Benches
 # with nothing in the ring take the nearest N producers within the far radius,
-# then the nearest N Novi PUD/RES sticks (TVDs can be placeholders).
+# then the nearest N BOX sticks (a BOX target TVD may come from a grid rung).
 _TVD_LOCAL_MIN_WELLS = 3
 _TVD_NEAREST_N = 10
 _TVD_FAR_M = 16093.0                # 10 mi
@@ -558,24 +562,33 @@ _NEAREST_PRODUCER_TVD_SQL = """
     ) s WHERE rn <= %(n)s
 """
 
-_NEAREST_STICK_TVD_SQL = """
+# The adoptable BOX sticks: the RECORD stick set(s) (one per basin), filtered
+# through the BOX reconciliation (curated.box_location_status, engineering_db):
+# only sticks that count as inventory (open / pending / permitted). Crowded,
+# conflict and producing sticks are not locations here; a stick with no status
+# row yet is treated as inventory (never silently dropped). No Novi relation
+# is read: a quarterly Novi reload cannot change what a unit adopts.
+_BOX_FROM = """
+        FROM box.location_stick s
+        JOIN box.location_set ls ON ls.set_id = s.set_id AND ls.is_record
+        LEFT JOIN curated.box_location_status st
+               ON st.set_id = s.set_id AND st.location_id = s.location_id
+        WHERE (st.location_id IS NULL OR st.counts_as_inventory)
+"""
+
+_NEAREST_STICK_TVD_SQL = f"""
     SELECT fb, tvd, d FROM (
-        SELECT ifb.formation_blueox AS fb, il.tvd AS tvd,
-               ST_Distance(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s)) AS d,
+        SELECT s.formation_blueox AS fb, s.target_tvd_ft AS tvd,
+               ST_Distance(s.legs_geom::geography, ST_GeogFromText(%(aoi)s)) AS d,
                row_number() OVER (
-                   PARTITION BY ifb.formation_blueox
-                   ORDER BY ST_Distance(il.wellstick_geom::geography,
+                   PARTITION BY s.formation_blueox
+                   ORDER BY ST_Distance(s.legs_geom::geography,
                                         ST_GeogFromText(%(aoi)s))) AS rn
-        FROM curated.intel_locations il
-        JOIN curated.intel_formation_blueox ifb USING (stick_id)
-        LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
-        WHERE il.category IN ('PUD', 'RES') AND il.tvd IS NOT NULL
-          AND il.wellstick_geom IS NOT NULL
-          AND ifb.formation_blueox = ANY(%(codes)s)
-          AND ST_DWithin(il.wellstick_geom::geography,
+        {_BOX_FROM}
+          AND s.target_tvd_ft IS NOT NULL
+          AND s.formation_blueox = ANY(%(codes)s)
+          AND ST_DWithin(s.legs_geom::geography,
                          ST_GeogFromText(%(aoi)s), %(far)s)
-          AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
-               OR ri.status IN ('remaining_pud', 'conflict'))
     ) s WHERE rn <= %(n)s
 """
 
@@ -587,17 +600,20 @@ def available_benches(
 ) -> list[BenchInfo]:
     """The parcel basin's FULL stratigraphic column (STRAT_COLUMN), in column
     order, with local evidence attached — never a list filtered by evidence.
-    The generator exists to place sticks Novi didn't, so a bench with no Novi
-    inventory or producers in the ring still gets a row.
+    The generator exists to place sticks where there are none, so a bench with
+    no BOX sticks or producers in the ring still gets a row.
 
-    Evidence within `buffer_ft` (Novi PUD/RES sticks via curated.intel_
-    formation_blueox, producers via curated.wells_enriched) supplies the counts
-    and the suggested per-bench spacing (de-facto same-bench row gap — Bone
-    Spring develops wider than Wolfcamp). Median landing TVD, first hit wins:
-    producers in the ring; Novi PUD/RES stick TVDs in the ring; the nearest
-    _TVD_NEAREST_N producers within _TVD_FAR_M; the nearest Novi sticks there;
-    else None (the engineer enters it). `tvd_basis` says which; tvd_local=False
-    marks the two widened tiers.
+    Evidence within `buffer_ft` (adoptable BOX sticks, box.location_stick of the
+    record set; producers via curated.wells_enriched) supplies the counts.
+    The suggested per-bench spacing is the median planned spacing the IN-UNIT
+    BOX sticks of that bench carry (their own `spacing_ft`). Median landing
+    TVD, first hit wins: producers in the ring; BOX stick target TVDs in the
+    ring; the nearest _TVD_NEAREST_N producers within _TVD_FAR_M; the nearest
+    BOX sticks there; else None (the engineer enters it). `tvd_basis` says
+    which; tvd_local=False marks the two widened tiers. A BOX target TVD may
+    come from a thickness or grid rung, not a well: the basis label names it
+    as a BOX stick so the engineer can tell (decided 2026-11-25).
+    No Novi relation is read.
     Codes outside the column that do show up in the ring (OTHER, ...) are kept
     with strat_rank None."""
     aoi = parcel_to_ewkt_4326(parcel)
@@ -623,34 +639,22 @@ def available_benches(
             for i, fb in enumerate(STRAT_COLUMN[basin])
         }
 
-        # Novi intel sticks (PUD/RES/PDP) carrying a formation_blueox. PUD + RES pass
-        # the SAME reconciliation filter as _STICK_SQL (realized ones are already
-        # drilled) so the bench menu counts match what the map/gun-barrel shows.
-        # Counts only — stick TVDs are the last-resort tier below.
+        # Adoptable BOX sticks in the ring, per bench: the SAME filter as
+        # _BOX_STICK_SQL so the bench menu counts match what the map/gun-barrel
+        # shows. Counts only — stick TVDs are the fallback tier below.
         cur.execute(
-            """
-            SELECT ifb.formation_blueox AS fb, il.category, COUNT(*) AS n
-            FROM curated.intel_locations il
-            JOIN curated.intel_formation_blueox ifb USING (stick_id)
-            LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
-            WHERE il.wellstick_geom IS NOT NULL
-              AND ifb.formation_blueox IS NOT NULL
-              AND ST_DWithin(il.wellstick_geom::geography,
+            f"""
+            SELECT s.formation_blueox AS fb, COUNT(*) AS n
+            {_BOX_FROM}
+              AND ST_DWithin(s.legs_geom::geography,
                              ST_GeogFromText(%(aoi)s), %(buf)s)
-              AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
-                   OR ri.status IN ('remaining_pud', 'conflict'))
-            GROUP BY 1, 2
+            GROUP BY 1
             """,
             {"aoi": aoi, "buf": buf_m},
         )
-        for fb, category, n in cur.fetchall():
+        for fb, n in cur.fetchall():
             b = benches.setdefault(fb, BenchInfo(fb, None, 0, 0, 0, None))
-            if category == "PUD":
-                b.n_pud += n
-            elif category == "RES":
-                b.n_res += n
-            elif category == "PDP":
-                b.n_pdp += n
+            b.n_box += n
 
         # PDP producers in the ring (authoritative for proven benches + TVD)
         cur.execute(
@@ -669,21 +673,21 @@ def available_benches(
         )
         for fb, n, med_tvd in cur.fetchall():
             b = benches.setdefault(fb, BenchInfo(fb, None, 0, 0, 0, None))
-            b.n_pdp = max(b.n_pdp, n)                  # producers, not intel-PDP sticks
-            if med_tvd is not None:                    # producer TVD supersedes Novi
+            b.n_pdp = n
+            if med_tvd is not None:                    # producer TVD comes first
                 b.median_tvd_ft = med_tvd
                 thin = " (thin)" if n < _TVD_LOCAL_MIN_WELLS else ""
                 b.tvd_basis = f"{_plural(n, 'producer')} within {ring_mi:g} mi{thin}"
                 b.tvd_local = True
 
-        # No producer in the ring: Novi stick TVDs in the ring (same precedence as
-        # before the full column), then — only for benches with NOTHING in the
-        # ring, i.e. rows that exist because the column is always listed — the
-        # nearest producers out to _TVD_FAR_M, then the nearest Novi sticks.
+        # No producer in the ring: BOX stick target TVDs in the ring, then — only
+        # for benches with NOTHING in the ring, i.e. rows that exist because the
+        # column is always listed — the nearest producers out to _TVD_FAR_M,
+        # then the nearest BOX sticks.
         tiers = (
-            (_NEAREST_STICK_TVD_SQL, buf_m, 100_000, "Novi stick", True),
+            (_NEAREST_STICK_TVD_SQL, buf_m, 100_000, "BOX stick", True),
             (_NEAREST_PRODUCER_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "producer", False),
-            (_NEAREST_STICK_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "Novi stick", False),
+            (_NEAREST_STICK_TVD_SQL, _TVD_FAR_M, _TVD_NEAREST_N, "BOX stick", False),
         )
         for sql, reach_m, n_max, label, local in tiers:
             missing = [fb for fb, b in benches.items() if b.median_tvd_ft is None]
@@ -703,62 +707,38 @@ def available_benches(
                     reach_mi = max(d for _, d in pts) * FT_PER_M / 5280.0
                     b.tvd_basis = f"nearest {_plural(len(pts), label)}, out to {reach_mi:.1f} mi"
 
-        # de-facto per-bench spacing: project same-bench stick centroids onto the
-        # cross-section axis (perpendicular to the grid azimuth) and take the
-        # median gap between distinct rows. Robust to near-duplicate/stacked
-        # sticks (same lateral as PUD+RES, report versions), which a raw nearest-
-        # neighbor distance double-counts as ~0 ft. No grid azimuth (no offset
-        # laterals) OR an UNCONFIDENT one (mixed-grid neighborhood — the toucan
-        # defect) -> skip: projecting on a fake or distrusted axis fabricates
-        # spacing just the same.
-        # IN-UNIT sticks only (the same >=30% co-extent membership the inventory
-        # uses): Novi's predicted DSUs rarely line up with the deal's unit, so
-        # end-to-end pads from adjacent Novi DSUs sit laterally shifted — their
-        # rows interleave on the cross axis and fabricate tight gaps (broTime
-        # 20-35 BS1_S read ~550 ft where the in-unit pattern is ~1,300).
-        grid = lateral_azimuth_stats(conn, parcel, buffer_ft=max(buffer_ft, 5280.0))
-        az = grid.azimuth_deg if grid.confident else None
-        cross: dict[str, list[float]] = {}
-        if az is not None:
-            perp = cross_axis(az)                      # canonical cross axis (E, N)
-            cur.execute(
-                f"""
-                SELECT ifb.formation_blueox AS fb,
-                       ST_X(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS x,
-                       ST_Y(ST_Transform(ST_Centroid(il.wellstick_geom), {WORK_EPSG})) AS y
-                FROM curated.intel_locations il
-                JOIN curated.intel_formation_blueox ifb USING (stick_id)
-                LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
-                WHERE ifb.formation_blueox IS NOT NULL AND il.wellstick_geom IS NOT NULL
-                  AND ST_DWithin(il.wellstick_geom::geography,
-                                 ST_GeogFromText(%(aoi)s), %(buf)s)
-                  AND ST_Length(il.wellstick_geom) > 0
-                  AND ST_Length(ST_Intersection(il.wellstick_geom, ST_GeomFromEWKT(%(aoi)s)))
-                      >= 0.30 * ST_Length(il.wellstick_geom)
-                  AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
-                       OR ri.status IN ('remaining_pud', 'conflict'))
-                """,
-                {"aoi": aoi, "buf": buf_m},
-            )
-            for fb, x, y in cur.fetchall():
-                if fb in benches and x is not None and y is not None:
-                    cross.setdefault(fb, []).append((x * perp[0] + y * perp[1]) * FT_PER_M)
-
-    for fb, vals in cross.items():
-        rows = sorted({round(v / 50.0) * 50.0 for v in vals})       # dedup rows to ~50 ft
-        gaps = [b - a for a, b in zip(rows, rows[1:]) if (b - a) >= 200.0]  # skip duplicates
-        if gaps:
-            benches[fb].suggested_spacing_ft = round(_median(gaps), 0)
+        # Suggested per-bench spacing = the median planned spacing the IN-UNIT
+        # BOX sticks of the bench carry (`spacing_ft`, leg to leg; the stick
+        # generator's own number, set from producing-well spacing around the
+        # stick). In-unit = the same >=30% co-extent membership the inventory
+        # uses, over all legs: a neighbouring DSU's sticks say nothing about
+        # this unit. No in-unit stick -> None (the UI falls back to its default).
+        cur.execute(
+            f"""
+            SELECT s.formation_blueox AS fb,
+                   percentile_cont(0.5) WITHIN GROUP (ORDER BY s.spacing_ft) AS sp
+            {_BOX_FROM}
+              AND s.spacing_ft IS NOT NULL
+              AND ST_DWithin(s.legs_geom::geography,
+                             ST_GeogFromText(%(aoi)s), %(buf)s)
+              AND ST_Length(s.legs_geom) > 0
+              AND ST_Length(ST_Intersection(s.legs_geom, ST_GeomFromEWKT(%(aoi)s)))
+                  >= 0.30 * ST_Length(s.legs_geom)
+            GROUP BY 1
+            """,
+            {"aoi": aoi, "buf": buf_m},
+        )
+        for fb, sp in cur.fetchall():
+            if fb in benches and sp is not None:
+                benches[fb].suggested_spacing_ft = round(float(sp), 0)
 
     out = sorted(benches.values(), key=_strat_sort_key)
     for b in out:
         srcs = []
         if b.n_pdp:
             srcs.append(f"{b.n_pdp} PDP")
-        if b.n_pud:
-            srcs.append(f"{b.n_pud} PUD")
-        if b.n_res:
-            srcs.append(f"{b.n_res} RES")
+        if b.n_box:
+            srcs.append(f"{b.n_box} BOX")
         sp = f", ~{b.suggested_spacing_ft:.0f} ft spacing" if b.suggested_spacing_ft else ""
         b.note = (f"{b.formation} @ {b.median_tvd_ft:,.0f} ft TVD [{b.tvd_basis}] "
                   f"({', '.join(srcs) or 'no control'}{sp})"
@@ -822,30 +802,18 @@ _PDP_SQL = f"""
     ORDER BY api10
 """
 
-# PUD AND RES sticks are filtered through the §6 reconciliation (curated.
-# reconciled_inventory, engineering_db sql/68 — every Novi stick since D117,
-# 2026-10-21): only genuinely-remaining inventory (remaining_pud), ambiguous
-# (conflict), and NOT-YET-RECONCILED (no row — treat as remaining, don't
-# silently drop) are drillable locations — realized_drift/realized_phantom are
-# already drilled, so they're NOT shown, whatever Novi called the stick.
-_STICK_SQL = """
-    SELECT il.stick_id, ifb.formation_blueox, il.tvd, il.unique_id,
-           lower(il.category), ri.status,
-           sup.pdp_count_3mi, sup.inflation_ratio,
-           ST_X(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
-           ST_Y(ST_StartPoint(ST_LineMerge(il.wellstick_geom))),
-           ST_X(ST_EndPoint(ST_LineMerge(il.wellstick_geom))),
-           ST_Y(ST_EndPoint(ST_LineMerge(il.wellstick_geom)))
-    FROM curated.intel_locations il
-    JOIN curated.intel_formation_blueox ifb USING (stick_id)
-    LEFT JOIN curated.reconciled_inventory ri USING (stick_id)
-    LEFT JOIN curated.intel_pdp_support sup USING (stick_id)   -- offset-support (sql/30)
-    WHERE il.category = ANY(%(cats)s) AND il.wellstick_geom IS NOT NULL
-      AND ifb.formation_blueox IS NOT NULL
-      AND ST_DWithin(il.wellstick_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
-      AND (il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL
-           OR ri.status IN ('remaining_pud', 'conflict'))
-    ORDER BY il.stick_id
+# Adoptable BOX sticks around a parcel (see _BOX_FROM for the filter). Legs and
+# turn come back as WKT in 4326: a stick is one leg ('single') or two legs
+# joined by a turn arc ('uturn'), the same shapes the generator makes.
+_BOX_STICK_SQL = f"""
+    SELECT s.location_id, s.set_id, s.formation_blueox, s.target_tvd_ft,
+           s.well_name, s.well_type, COALESCE(st.status, 'open'),
+           s.spacing_ft, s.setback_ft, s.completed_lateral_ft, s.drilled_lateral_ft,
+           s.turn_radius_ft, s.turn_arc_ft, s.turn_dls_deg_per_100ft,
+           ST_AsText(s.legs_geom, 7), ST_AsText(s.turn_geom, 7)
+    {_BOX_FROM}
+      AND ST_DWithin(s.legs_geom::geography, ST_GeogFromText(%(aoi)s), %(buf)s)
+    ORDER BY s.location_id
 """
 
 
@@ -883,6 +851,68 @@ def _passthrough_well(fb, tvd, name, novi, category, h_lon, h_lat, t_lon, t_lat,
     return well, ((hx + tx) / 2.0, (hy + ty) / 2.0)
 
 
+def _box_well(location_id, set_id, fb, tvd, name, well_type, status, spacing_ft,
+              setback_ft, completed_ft, drilled_ft, turn_radius_ft, turn_arc_ft,
+              turn_dls, legs_wkt, turn_wkt):
+    """Build an InventoryWell from one BOX stick (box.location_stick): one leg
+    ('single') or two legs joined by a turn ('uturn'), heel -> toe as stored.
+    Returns (well, cross_m) like _passthrough_well, or None when the stick has
+    no usable leg. Leg lengths are measured in the work CRS; the well's
+    completed / drilled lateral are the stick's STORED numbers (the BOX
+    forecast was run on them). gunbarrel_x and lateral_azimuth_deg are set by
+    the caller. The name is the stick's own (pad-bench-slot), stable within a
+    stick set; `box_set_id` records which set."""
+    geom = shp_wkt.loads(legs_wkt) if legs_wkt else None
+    lines = [g for g in getattr(geom, "geoms", [geom] if geom is not None else [])
+             if g is not None and len(g.coords) >= 2]
+    legs: list[Leg] = []
+    for ln in lines:
+        (h_lon, h_lat), (t_lon, t_lat) = ln.coords[0][:2], ln.coords[-1][:2]
+        hx, hy = _to_work(h_lon, h_lat)
+        tx, ty = _to_work(t_lon, t_lat)
+        length_ft = math.hypot(tx - hx, ty - hy) * FT_PER_M
+        if length_ft <= 0:
+            continue
+        legs.append(Leg(
+            heel_xy=(round(hx, 2), round(hy, 2)), toe_xy=(round(tx, 2), round(ty, 2)),
+            heel_lonlat=(round(h_lon, 6), round(h_lat, 6)),
+            toe_lonlat=(round(t_lon, 6), round(t_lat, 6)),
+            length_ft=round(length_ft, 1), gunbarrel_x_ft=0.0,   # set by caller
+        ))
+    if not legs:
+        return None
+    turn = None
+    if len(legs) == 2 and turn_wkt:
+        arc_ll = [(round(x, 6), round(y, 6)) for x, y in
+                  (c[:2] for c in shp_wkt.loads(turn_wkt).coords)]
+        arc_xy = [tuple(round(v, 2) for v in _to_work(x, y)) for x, y in arc_ll]
+        radius = float(turn_radius_ft) if turn_radius_ft else 0.0
+        turn = Turn(
+            arc_xy=arc_xy, arc_lonlat=arc_ll, radius_ft=round(radius, 1),
+            arc_ft=round(float(turn_arc_ft) if turn_arc_ft else math.pi * radius, 1),
+            dls_deg_per_100ft=round(float(turn_dls) if turn_dls
+                                    else (5729.58 / radius if radius else 0.0), 2),
+        )
+    measured = round(sum(leg.length_ft for leg in legs), 1)
+    completed = round(float(completed_ft), 1) if completed_ft else measured
+    drilled = (round(float(drilled_ft), 1) if drilled_ft
+               else round(completed + (turn.arc_ft if turn else 0.0), 1))
+    well = InventoryWell(
+        scenario_id="", deal_id="", well_name=str(name or f"box-{location_id}"),
+        well_type="uturn" if turn is not None else "single", formation=fb,
+        target_tvd_ft=float(tvd) if tvd else 0.0, lateral_azimuth_deg=0.0,
+        legs=legs, turn=turn,
+        completed_lateral_ft=completed, drilled_lateral_ft=drilled,
+        nearest_neighbor_spacing_ft=round(float(spacing_ft), 1) if spacing_ft else 0.0,
+        setback_ft=round(float(setback_ft), 1) if setback_ft else 0.0,
+        category="box", novi_wellname=None, recon_status=status,
+        stick_id=int(location_id), box_set_id=int(set_id) if set_id is not None else None,
+    )
+    mids = [((leg.heel_xy[0] + leg.toe_xy[0]) / 2.0, (leg.heel_xy[1] + leg.toe_xy[1]) / 2.0)
+            for leg in legs]
+    return well, (sum(m[0] for m in mids) / len(mids), sum(m[1] for m in mids) / len(mids))
+
+
 def _axial_dist_deg(a: float, b: float) -> float:
     """Distance between two axial bearings on the [0, 180) circle (1° and
     179° are 2° apart — a line has no direction)."""
@@ -891,6 +921,9 @@ def _axial_dist_deg(a: float, b: float) -> float:
 
 
 _STICKS_AZ_TRIM_DEG = 30.0   # off-axis cut for the dominant-mode iteration
+# pass-through categories that are PLANNED locations: 'box' (adopted BOX
+# sticks); 'pud' / 'res' only on scenarios saved before the BOX cutover
+PLANNED_STICK_CATEGORIES: tuple[str, ...] = ("box", "pud", "res")
 
 
 def sticks_azimuth_deg(wells: list[InventoryWell]) -> float | None:
@@ -934,10 +967,10 @@ def resolve_baseline_azimuth(
     """The cross-section frame azimuth for an adopted (curate) baseline, in
     order of trust:
 
-    1. the kept PLANNED sticks' own bearings (adopted Novi pud/res — the
+    1. the kept PLANNED sticks' own bearings (adopted BOX sticks — the
        inventory the scenario is ABOUT; the frame follows the development
        direction, not the legacy producers: a unit whose old PDPs run N-S
-       under a NE-grid Novi plan must frame on the plan);
+       under a NE-grid plan must frame on the plan);
     2. the kept EXISTING sticks (pure-PDP adoption: the producers are then
        the whole subject);
     3. the neighborhood grid azimuth, ONLY when its coherence gate passes;
@@ -950,7 +983,7 @@ def resolve_baseline_azimuth(
     0.62-0.71 — below the 0.85 trust floor), so wells that plainly run ~57°
     were stamped 24-41°, and the gunbarrel offsets were projected on that
     phantom axis. Never use an unconfident neighborhood mean."""
-    planned = [w for w in kept if w.category in ("pud", "res")]
+    planned = [w for w in kept if w.category in PLANNED_STICK_CATEGORIES]
     az = sticks_azimuth_deg(planned)
     if az is None:
         az = sticks_azimuth_deg(kept)
@@ -985,22 +1018,24 @@ def _classify_membership(
 ) -> tuple[list[tuple[InventoryWell, tuple[float, float]]],
            list[tuple[InventoryWell, tuple[float, float]]]]:
     """Split fetched laterals into (kept, context). kept = unit membership: at
-    least `min_overlap_frac` of the leg runs INSIDE the parcel (co-extent overlap,
-    never min-distance) — a long lateral that merely clips the edge on its way to
+    least `min_overlap_frac` of the producing legs' combined length runs INSIDE
+    the parcel (co-extent overlap over every leg — a U-turn has two — never
+    min-distance) — a long lateral that merely clips the edge on its way to
     a neighbouring unit is excluded. context = PDP-only laterals that FAIL
     membership but lie within `context_radius_m` of the parcel: offset background
     for the gun-barrel/map, never persisted or exported. Pure (no DB) for tests."""
     kept: list[tuple[InventoryWell, tuple[float, float]]] = []
     context: list[tuple[InventoryWell, tuple[float, float]]] = []
     for well, cross in items:
-        leg = well.legs[0]
-        line = LineString([leg.heel_xy, leg.toe_xy])
-        if line.length <= 0:
+        lines = [LineString([leg.heel_xy, leg.toe_xy]) for leg in well.legs]
+        total = sum(ln.length for ln in lines)
+        if total <= 0:
             continue
-        if line.intersection(parcel).length / line.length >= min_overlap_frac:
+        inside = sum(ln.intersection(parcel).length for ln in lines)
+        if inside / total >= min_overlap_frac:
             kept.append((well, cross))
         elif (context_radius_m is not None and well.category == "pdp"
-              and line.distance(parcel) <= context_radius_m):
+              and min(ln.distance(parcel) for ln in lines) <= context_radius_m):
             context.append((well, cross))
     return kept, context
 
@@ -1009,15 +1044,16 @@ def inventory_from_warehouse(
     conn: psycopg.Connection,
     parcel: BaseGeometry,
     buffer_ft: float = 1320.0,
-    categories: tuple[str, ...] = ("pdp", "pud", "res"),
+    categories: tuple[str, ...] = ("pdp", "box"),
     min_overlap_frac: float = 0.30,
     context_radius_ft: float | None = None,
 ) -> tuple[list[InventoryWell], float]:
     """Adopt the EXISTING inventory IN a parcel as InventoryWells — the curate-mode
     baseline. Returns (wells, frame_azimuth_deg). PDP producers
-    (curated.wells_enriched, landing->bottom-hole leg) and Novi PUD/RES sticks
-    (curated.intel_locations + intel_formation_blueox) become single-leg wells
-    tagged by `category`. Unit membership is co-extent overlap
+    (curated.wells_enriched, landing->bottom-hole leg) become single-leg wells
+    tagged 'pdp'; adoptable BOX sticks (box.location_stick of the record set,
+    one or two legs) become wells tagged 'box'. No Novi stick is read (the
+    legacy 'pud' / 'res' categories are ignored). Unit membership is co-extent overlap
     (see _classify_membership); with `context_radius_ft`, near-parcel PDP laterals
     that fail membership come back flagged `context=True` (visual background only).
     gunbarrel_x is the CANONICAL cross-section offset — placement.cross_axis(az)
@@ -1040,17 +1076,12 @@ def inventory_from_warehouse(
                     items.append(_passthrough_well(fb, tvd, api10, None, "pdp",
                                                    hlon, hlat, tlon, tlat,
                                                    fallback_name=api10))
-        stick_cats = [c.upper() for c in categories if c in ("pud", "res")]
-        if stick_cats:
-            cur.execute(_STICK_SQL, {"aoi": aoi, "buf": buf_m, "cats": stick_cats})
-            for sid, fb, tvd, uid, cat, status, pc3, infl, hlon, hlat, tlon, tlat in cur.fetchall():
-                if None not in (hlon, hlat, tlon, tlat):
-                    items.append(_passthrough_well(fb, tvd, uid, uid, cat,
-                                                   hlon, hlat, tlon, tlat,
-                                                   fallback_name=f"{cat}-{sid}",
-                                                   recon_status=status,
-                                                   pdp_count_3mi=pc3, inflation_ratio=infl,
-                                                   stick_id=sid))
+        if "box" in categories:
+            cur.execute(_BOX_STICK_SQL, {"aoi": aoi, "buf": buf_m})
+            for row in cur.fetchall():
+                built = _box_well(*row)
+                if built is not None:
+                    items.append(built)
 
     context_m = (context_radius_ft / FT_PER_M) if context_radius_ft else None
     kept, context = _classify_membership(items, parcel, min_overlap_frac, context_m)
@@ -1160,8 +1191,8 @@ def apply_handoff_support(
 ) -> None:
     """Fill pdp_count_3mi (where unscored) and handoff_category (where unset)
     in place. Context wells are background-only and skipped. With no
-    connection, only the DB-free derivation runs (curated sticks already carry
-    their matview counts; generated wells stay unscored -> UPSIDE)."""
+    connection, only the DB-free derivation runs (unscored BOX sticks and
+    generated wells stay unscored -> UPSIDE)."""
     for w in wells:
         if w.context:
             continue
@@ -1214,8 +1245,10 @@ def apply_novi_rep(conn: psycopg.Connection | None, wells: list[InventoryWell]) 
     curated.intel_representative_sticks (same bench, PUD/RES sticks within
     NOVI_REP_RADIUS_M, lateral within the BASIN'S ll tolerance —
     NOVI_REP_LATERAL_TOL_BY_BASIN, amendment 2026-07-30); n < NOVI_REP_LOW_N
-    flags low_n. CURATED pud/res pass-throughs ARE novi sticks — their set is
-    exactly themselves (mode 'self'). PDP producers and context wells carry no
+    flags low_n. Adopted BOX sticks take the SAME neighborhood set (a BOX stick
+    is ours, not Novi's: the comparison is the Novi sticks around it). Legacy
+    pud/res pass-throughs ARE novi sticks — their set is exactly themselves
+    (mode 'self'); nothing derives those any more. PDP producers and context wells carry no
     set (no intel ML forecast exists for producers). narvi persists the SET
     only — forecast fetching/median math is anduin's (narvi does not forecast).
 
@@ -1277,28 +1310,31 @@ def apply_novi_rep(conn: psycopg.Connection | None, wells: list[InventoryWell]) 
 def bench_summary(wells: list[InventoryWell]) -> list[BenchInfo]:
     """Bench menu derived from a kept inventory set, so the panel and the map agree
     exactly. Counts per category + median landing TVD per formation_blueox; spacing
-    left None (Novi's pass-through layout is the baseline, nothing to seed)."""
+    left None (the adopted layout is the baseline, nothing to seed). Legacy
+    'pud' / 'res' wells of an old saved scenario count with the BOX sticks."""
     agg: dict[str, dict] = {}
     for w in wells:
-        d = agg.setdefault(w.formation, {"pdp": 0, "pud": 0, "res": 0, "tvds": [], "supported": 0})
-        if w.category in ("pdp", "pud", "res"):
-            d[w.category] += 1
-        # offset-verified remaining inventory: pud/res sticks with >=1 in-bench
-        # PDP offset within 3 mi (curated.intel_pdp_support). pdp wells aren't scored.
-        if w.category in ("pud", "res") and (w.pdp_count_3mi or 0) > 0:
+        d = agg.setdefault(w.formation, {"pdp": 0, "box": 0, "tvds": [], "supported": 0})
+        if w.category == "pdp":
+            d["pdp"] += 1
+        elif w.category in PLANNED_STICK_CATEGORIES:
+            d["box"] += 1
+        # offset-verified inventory: adopted sticks with >=1 in-bench PDP offset
+        # within 3 mi (apply_handoff_support). pdp wells aren't scored.
+        if w.category in PLANNED_STICK_CATEGORIES and (w.pdp_count_3mi or 0) > 0:
             d["supported"] += 1
         if w.target_tvd_ft:
             d["tvds"].append(w.target_tvd_ft)
     out: list[BenchInfo] = []
     for fb, d in agg.items():
         med = round(_median(d["tvds"]), 0) if d["tvds"] else None
-        n_stick = d["pud"] + d["res"]
-        srcs = [f"{d[k]} {k.upper()}" for k in ("pdp", "pud", "res") if d[k]]
+        n_stick = d["box"]
+        srcs = [f"{d[k]} {k.upper()}" for k in ("pdp", "box") if d[k]]
         if n_stick:
             srcs.append(f"{d['supported']}/{n_stick} supp")
         note = (f"{fb} @ {med:,.0f} ft TVD ({', '.join(srcs)})"
                 if med is not None else f"{fb} ({', '.join(srcs)})")
-        out.append(BenchInfo(fb, med, d["pdp"], d["pud"], d["res"], None, note,
-                             n_supported=d["supported"]))
+        out.append(BenchInfo(fb, med, d["pdp"], 0, 0, None, note,
+                             n_supported=d["supported"], n_box=d["box"]))
     out.sort(key=lambda b: b.median_tvd_ft if b.median_tvd_ft is not None else 1e9)
     return out

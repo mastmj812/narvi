@@ -138,11 +138,12 @@ export interface BenchInfo {
   formation: string;
   median_tvd_ft: number | null;
   n_pdp: number;
-  n_pud: number;
-  n_res: number;
+  n_pud: number;                   // legacy, always 0 (Novi sticks are no longer locations)
+  n_res: number;                   // legacy, always 0
+  n_box?: number;                  // adoptable BOX sticks
   suggested_spacing_ft: number | null;
   note: string;
-  n_supported?: number | null;     // pud/res sticks with offset support (sql/30)
+  n_supported?: number | null;     // BOX sticks with offset support
   depth_allowed?: boolean | null;  // false = outside the deal depth window (soft flag)
   strat_rank?: number | null;      // position in the basin's strat column (0 = shallowest)
   tvd_basis?: string | null;       // provenance of median_tvd_ft (offset tier)
@@ -157,7 +158,9 @@ export interface InventoryResponse {
   dev_benches: BenchInfo[];    // area-developable (override)
 }
 
-export type Category = "pdp" | "pud" | "res";
+// "box" = adopted BOX sticks (engineering_db box.location_stick). The old Novi
+// "pud" / "res" categories are retired; the server refuses them.
+export type Category = "pdp" | "box";
 
 // summary stamped on a curate save (backend /scenarios/curate) — the filter
 // recipe needed to restore the editable curate state on load
@@ -307,7 +310,7 @@ export const api = {
   // context; the gun-barrel is a unit cross-section, not a neighborhood one).
   // min/max_depth_ft = the engineer's deal depth window: out-of-window benches
   // come back with depth_allowed=false (soft flag, still selectable).
-  inventory: (parcel: GeoJSON.Geometry, buffer_ft = 5280, categories: Category[] = ["pdp", "pud", "res"],
+  inventory: (parcel: GeoJSON.Geometry, buffer_ft = 5280, categories: Category[] = ["pdp", "box"],
     context_radius_ft: number | null = null,
     min_depth_ft: number | null = null, max_depth_ft: number | null = null) =>
     jpost<InventoryResponse>("/api/parcels/inventory",
@@ -355,7 +358,7 @@ export const api = {
       deal_id, scenario_id, name, parcel, kept_benches, categories, culled_wells, buffer_ft,
     }),
 
-  // culled_wells bake out server-side; the kept Novi baseline + generated wells
+  // culled_wells bake out server-side; the kept BOX sticks + generated wells
   // persist together as one scenario
   saveComposedScenario: (body: SaveComposedBody) =>
     jpost<{ saved_wells: number }>("/api/scenarios/composed", body),

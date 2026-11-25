@@ -84,9 +84,17 @@ def header_well_type(params: ScenarioParams, wells: list[InventoryWell]) -> str:
     """Scenario header well_type: 'mixed' when the PLANNED wells include both
     single and U-turn (per-bench overrides, or a U-turn bench floored to singles),
     else the deal's own type. Per-well rows always carry their own type; the
-    header is a display label downstream (anduin lists it, never branches on it)."""
-    kinds = {w.well_type for w in wells if w.category == "generated"}
-    return "mixed" if len(kinds) > 1 else params.well_type
+    header is a display label downstream (anduin lists it, never branches on it).
+    Adopted BOX sticks are planned wells too (a BOX stick can be a U-turn): with
+    no generated well, a plan of BOX sticks of one type takes that type instead
+    of the synthetic 'single' of a pass-through header."""
+    generated = {w.well_type for w in wells if w.category == "generated"}
+    adopted = {w.well_type for w in wells if w.category == "box"}
+    if len(generated | adopted) > 1:
+        return "mixed"
+    if not generated and len(adopted) == 1:
+        return next(iter(adopted))
+    return params.well_type
 
 
 def save_scenario(
@@ -252,6 +260,7 @@ def _well_from_detail(detail: dict) -> InventoryWell:
         # novi identity + representative comparison set (anduin reads both
         # from `detail`; see warehouse.apply_novi_rep)
         stick_id=detail.get("stick_id"),
+        box_set_id=detail.get("box_set_id"),
         novi_rep=detail.get("novi_rep"),
         # PDP standoff (frac-hit) annotation — absent on pre-check saves
         pdp_gap_ft=detail.get("pdp_gap_ft"),

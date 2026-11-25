@@ -62,11 +62,12 @@ const legPdp: LineLayerSpecification = {
   },
 };
 
-// the plan: Novi PUD pass-through (and generated/override) — prominent
+// the plan: adopted BOX sticks (and generated/override) — prominent. 'pud' stays
+// in the filter for a scenario saved before the BOX cutover.
 const legPlan: LineLayerSpecification = {
   id: "scenario-leg-plan", type: "line", source: SCENARIO_SOURCE,
   filter: ["all", ["==", ["get", "kind"], "leg"],
-    ["in", ["get", "category"], ["literal", ["pud", "generated"]]]],
+    ["in", ["get", "category"], ["literal", ["box", "pud", "generated"]]]],
   paint: {
     "line-color": color, "line-opacity": 0.95,
     "line-width": ["interpolate", ["linear"], ["zoom"], 9, 2.5, 14, 4.5],

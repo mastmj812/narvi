@@ -1,8 +1,9 @@
 """The generation bench menu is the basin's FULL stratigraphic column, in column
 order — local evidence never decides which benches exist (Gator Tails 44-5-8:
 no BS1_S within 1 mi, so BS1_S vanished from the menu and couldn't be
-generated). TVD precedence: ring producers -> ring Novi sticks -> nearest
-producers (widened) -> nearest Novi sticks (widened) -> None."""
+generated). TVD precedence: ring producers -> ring BOX sticks -> nearest
+producers (widened) -> nearest BOX sticks (widened) -> None. Spacing = the
+in-unit BOX sticks' own planned spacing."""
 
 from contextlib import contextmanager
 
@@ -15,8 +16,12 @@ class _Cursor:
     """Answers each query by what it reads; widened tiers only see the codes
     still missing (asserted via the `codes` bind)."""
 
-    def __init__(self, basin, ring_producers, ring_sticks, far_producers, far_sticks):
+    def __init__(self, basin, ring_producers, ring_sticks, far_producers, far_sticks,
+                 box_counts=(), box_spacing=()):
         self.basin = basin
+        self.box_counts = box_counts           # [(fb, n)]
+        self.box_spacing = box_spacing         # [(fb, median spacing_ft)]
+        self.sqls: list[str] = []
         self.ring_producers = ring_producers   # [(fb, n, med)]
         self.ring_sticks = ring_sticks         # [(fb, tvd, dist_m)]
         self.far_producers = far_producers
@@ -26,10 +31,11 @@ class _Cursor:
 
     def execute(self, sql, params=None):
         params = params or {}
+        self.sqls.append(sql)
         if "basin_blueox FROM" in sql:
             self.rows = [(self.basin,)] if self.basin else []
-        elif "GROUP BY 1, 2" in sql:                       # ring Novi counts
-            self.rows = []
+        elif "s.spacing_ft" in sql:                        # in-unit BOX spacing
+            self.rows = list(self.box_spacing)
         elif "percentile_cont" in sql:                     # ring producers
             self.rows = list(self.ring_producers)
         elif "row_number()" in sql:
@@ -41,8 +47,9 @@ class _Cursor:
                 src, tier = (self.ring_sticks, "ring_sticks") if ring else (self.far_sticks, "far_sticks")
             self.asked.append((tier, list(codes)))
             self.rows = [r for r in src if r[0] in codes]
-        else:                                              # azimuth / spacing
-            self.rows = []
+        else:                                              # ring BOX counts
+            assert "box.location_stick" in sql and "GROUP BY 1" in sql
+            self.rows = list(self.box_counts)
 
     def fetchall(self):
         return self.rows
@@ -104,18 +111,33 @@ def test_tvd_tier_precedence():
         far_sticks=[("BS1_S", 1.0, 1.0), ("WCD", 13000.0, 12000.0)],
     )
     by = {b.formation: b for b in out}
-    # ring producer beats ring Novi, even thin (prior precedence), and is labelled
+    # ring producer beats ring BOX sticks, even thin (prior precedence), and is labelled
     assert by["BS2_C"].median_tvd_ft == 10733.0
     assert by["BS2_C"].tvd_local is True and "thin" in by["BS2_C"].tvd_basis
-    # ring Novi beats a widened producer
+    # ring BOX sticks beat a widened producer
     assert by["AVA_0"].median_tvd_ft == 9293.0 and by["AVA_0"].tvd_local is True
     # nothing in the ring -> nearest producers, flagged non-local with reach
     assert by["BS1_S"].median_tvd_ft == 10100.0 and by["BS1_S"].tvd_local is False
     assert "producers, out to 5.6 mi" in by["BS1_S"].tvd_basis
-    # no producers within the far radius -> nearest Novi sticks
-    assert by["WCD"].median_tvd_ft == 13000.0 and by["WCD"].tvd_basis == "nearest 1 Novi stick, out to 7.5 mi"
+    # no producers within the far radius -> nearest BOX sticks
+    assert by["WCD"].median_tvd_ft == 13000.0 and by["WCD"].tvd_basis == "nearest 1 BOX stick, out to 7.5 mi"
     # widened tiers are only asked about benches still missing
     far_asks = dict(cur.asked)
     assert "BS2_C" not in far_asks["far_producers"] and "AVA_0" not in far_asks["far_producers"]
     assert "BS1_S" not in far_asks["far_sticks"]
     assert by["STRN"].median_tvd_ft is None
+
+
+def test_box_counts_and_spacing_and_no_novi_relation():
+    out, cur = _run(box_counts=[("WCA_1", 6), ("BS3_S", 2)],
+                    box_spacing=[("WCA_1", 880.0), ("OTHER", 660.0)])
+    by = {b.formation: b for b in out}
+    assert by["WCA_1"].n_box == 6 and by["BS3_S"].n_box == 2
+    assert by["WCA_1"].n_pud == 0 and by["WCA_1"].n_res == 0      # legacy fields stay empty
+    assert by["WCA_1"].suggested_spacing_ft == 880.0             # the sticks' own planned spacing
+    assert by["BS3_S"].suggested_spacing_ft is None              # no in-unit stick -> the UI default
+    assert "OTHER" not in by                                     # spacing alone never adds a bench
+    assert "6 BOX" in by["WCA_1"].note and "PUD" not in by["WCA_1"].note
+    # the rule (2026-11-24): nothing here is derived from Novi Intelligence
+    for sql in cur.sqls:
+        assert "intel_" not in sql and "reconciled_inventory" not in sql and "novi" not in sql.lower()

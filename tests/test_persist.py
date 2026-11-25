@@ -67,3 +67,23 @@ def test_split_strips_line_comments_and_blank_statements():
     )
     stmts = _split_statements(sql)
     assert stmts == ["CREATE TABLE t (id int)", "SELECT 1"]
+
+
+def test_header_well_type_counts_adopted_box_sticks():
+    """A pure-baseline plan of BOX U-turn sticks is not a 'single' scenario."""
+    from dataclasses import replace
+
+    from narvi.persist import header_well_type
+
+    p = ScenarioParams(formation="WCA_1", target_tvd_ft=11500, azimuth_deg=0.0,
+                       spacing_ft=990, setback_ft=200, min_lateral_ft=4000,
+                       anchor="center", well_type="single")
+    base = generate_scenario(synthetic_section(), p)[0][0]
+    u = replace(base, category="box", well_type="uturn")
+    s = replace(base, category="box", well_type="single")
+    pdp = replace(base, category="pdp", well_type="single")
+    assert header_well_type(p, [u, u, pdp]) == "uturn"
+    assert header_well_type(p, [u, s]) == "mixed"
+    assert header_well_type(p, [replace(base, category="generated"), u]) == "mixed"
+    assert header_well_type(p, [pdp]) == "single"
+    assert header_well_type(replace(p, well_type="uturn"), [replace(base, category="generated")]) == "uturn"

@@ -13,6 +13,7 @@ from shapely.geometry import box
 from narvi.records import FT_PER_M, InventoryWell, Leg
 from narvi.warehouse import (
     AzimuthStats,
+    _box_well,
     _classify_membership,
     _passthrough_well,
     axial_mean_deg,
@@ -169,17 +170,79 @@ def test_project_gunbarrel_frame():
     assert abs(w.legs[0].gunbarrel_x_ft - (500.0 * FT_PER_M)) < 0.1
 
 
-def test_reconciliation_filters_res_like_pud():
-    """D117 (engineering_db sql/68, 2026-10-21): reconciled_inventory covers every
-    Novi stick, so a realized RES slot is drilled, not inventory — the four stick
-    queries filter PUD and RES alike; other categories still pass through."""
-    import inspect
-
+def test_inventory_sql_reads_box_sticks_and_no_novi_relation():
+    """The rule (2026-11-24): Novi Intelligence is comparison only. The unit
+    inventory, the bench counts, the fallback depth and the spacing read the
+    RECORD BOX stick set through the BOX reconciliation; a stick with no status
+    row yet is kept (never silently dropped)."""
     import narvi.warehouse as wh
 
-    src = inspect.getsource(wh)
-    assert "il.category = 'RES' OR" not in src
-    assert "il.category <> 'PUD' OR" not in src
-    assert src.count("(il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL") == 4
-    assert "il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL" in wh._STICK_SQL
-    assert "il.category NOT IN ('PUD', 'RES') OR ri.status IS NULL" in wh._NEAREST_STICK_TVD_SQL
+    for sql in (wh._BOX_STICK_SQL, wh._NEAREST_STICK_TVD_SQL):
+        assert "box.location_stick" in sql and "ls.is_record" in sql
+        assert "st.location_id IS NULL OR st.counts_as_inventory" in sql
+        assert "(legs_geom)::geography" not in sql and "s.legs_geom::geography" in sql   # the indexed form
+        for novi in ("intel_locations", "intel_formation_blueox", "reconciled_inventory", "intel_pdp_support"):
+            assert novi not in sql
+    assert not hasattr(wh, "_STICK_SQL")
+
+
+_LEG_A = "(-103.80259 31.73768,-103.8026 31.72674)"
+_LEG_B = "(-103.79849 31.73768,-103.7985 31.72673)"
+_ARC = "LINESTRING(-103.8026 31.72674,-103.80055 31.72498,-103.7985 31.72673)"
+
+
+def test_box_single_stick_becomes_one_leg_well():
+    built = _box_well(10093425, 25, "LSSH", 8700.0, "18207-LSSH-01", "single", "open",
+                      880.0, 330.0, 3990.0, 3990.0, None, None, None,
+                      f"MULTILINESTRING({_LEG_A})", None)
+    w, _mid = built
+    assert w.category == "box" and w.well_type == "single" and w.turn is None
+    assert w.well_name == "18207-LSSH-01" and w.novi_wellname is None
+    assert w.stick_id == 10093425 and w.box_set_id == 25 and w.recon_status == "open"
+    assert len(w.legs) == 1 and w.legs[0].heel_lonlat == (-103.80259, 31.73768)
+    assert abs(w.legs[0].length_ft - 3980) < 15                  # ~0.0109 deg of latitude
+    assert w.completed_lateral_ft == 3990.0 and w.drilled_lateral_ft == 3990.0   # the STORED numbers
+    assert w.nearest_neighbor_spacing_ft == 880.0 and w.setback_ft == 330.0
+    assert w.pdp_count_3mi is None and w.inflation_ratio is None  # scored later, never from Novi
+
+
+def test_box_uturn_stick_keeps_both_legs_and_the_turn():
+    built = _box_well(10046716, 24, "BS3_C", 9918.6, "9042-BS3_C-01", "uturn", "permitted",
+                      1274.5, 330.0, 7962.0, 9964.0, 637.3, 2002.0, 8.99,
+                      f"MULTILINESTRING({_LEG_A},{_LEG_B})", _ARC)
+    w, mid = built
+    assert w.well_type == "uturn" and len(w.legs) == 2 and w.turn is not None
+    assert w.turn.radius_ft == 637.3 and w.turn.arc_ft == 2002.0 and w.turn.dls_deg_per_100ft == 8.99
+    assert len(w.turn.arc_xy) == 3 and w.turn.arc_lonlat[0] == (-103.8026, 31.72674)
+    assert w.completed_lateral_ft == 7962.0 and w.drilled_lateral_ft == 9964.0
+    # the two legs sit one spacing apart (~1,275 ft), both ~3,980 ft long, same direction
+    gap_ft = abs(w.legs[0].heel_xy[0] - w.legs[1].heel_xy[0]) * FT_PER_M
+    assert 1200 < gap_ft < 1350
+    assert abs(sticks_azimuth_deg([w]) - 0.0) < 2.0 or abs(sticks_azimuth_deg([w]) - 180.0) < 2.0
+    # the frame midpoint is between the legs, not on leg 1
+    assert min(w.legs[0].heel_xy[0], w.legs[1].heel_xy[0]) < mid[0] < max(w.legs[0].heel_xy[0], w.legs[1].heel_xy[0])
+    assert _box_well(1, 24, "WCA_1", 1.0, "x", "single", "open", 1, 1, 1, 1, None, None, None, None, None) is None
+
+
+def test_membership_uses_every_leg_of_a_uturn():
+    """A U-turn with one leg inside the unit and one outside is 50 % inside: kept
+    at the 30 % rule. Judged on leg 1 alone it would be 0 % or 100 %."""
+    parcel = box(0.0, 0.0, 1000.0, 1600.0)
+    w, mid = _leg_well("u", "box", (1200.0, 0.0), (1200.0, 1600.0))          # leg 1 OUTSIDE
+    w.legs.append(Leg(heel_xy=(800.0, 0.0), toe_xy=(800.0, 1600.0), heel_lonlat=(0, 0),
+                      toe_lonlat=(0, 0), length_ft=0.0, gunbarrel_x_ft=0.0))  # leg 2 inside
+    kept, context = _classify_membership([(w, mid)], parcel, 0.30, None)
+    assert [x.well_name for x, _ in kept] == ["u"] and context == []
+    kept, _ = _classify_membership([(w, mid)], parcel, 0.60, None)
+    assert kept == []
+    # an adopted BOX stick is never context, whatever the radius
+    off = _leg_well("off", "box", (1100.0, 0.0), (1100.0, 1600.0))
+    kept, context = _classify_membership([off], parcel, 0.30, 5280.0 / FT_PER_M)
+    assert kept == [] and context == []
+
+
+def test_box_sticks_set_the_frame_like_planned_sticks():
+    box_w = _leg_well("b", "box", (0.0, 0.0), (1000.0, 1000.0))[0]            # 45 deg
+    pdp_w = _leg_well("p", "pdp", (0.0, 0.0), (0.0, 1000.0))[0]               # 0 deg
+    assert resolve_baseline_azimuth([pdp_w, box_w], None, box(0, 0, 10, 10)) == 45.0
+
